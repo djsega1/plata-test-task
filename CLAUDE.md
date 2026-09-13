@@ -27,15 +27,16 @@ go test ./internal/provider/ -run TestRateParsesResponse    # one test
 go test ./internal/provider/ -run '^$' -bench . -benchtime 2s
 go test ./... -cover
 
-# integration tests (need PostgreSQL; skipped when the variable is unset)
+# integration tests (need PostgreSQL 18+; skipped when the variable is unset)
 TEST_DATABASE_URL='postgres://postgres@localhost:5432/quotes' go test -tags=integration ./internal/storage/postgres/
 ```
 
-A local cluster when no Docker is available (Debian/Ubuntu paths):
+A local cluster when no Docker is available (Debian/Ubuntu paths, PostgreSQL 18+ — see "IDs are
+UUIDv7" below):
 
 ```bash
-sudo -u postgres /usr/lib/postgresql/16/bin/initdb -D /tmp/pgb/data -U postgres --auth=trust
-sudo -u postgres /usr/lib/postgresql/16/bin/pg_ctl -D /tmp/pgb/data \
+sudo -u postgres /usr/lib/postgresql/18/bin/initdb -D /tmp/pgb/data -U postgres --auth=trust
+sudo -u postgres /usr/lib/postgresql/18/bin/pg_ctl -D /tmp/pgb/data \
   -o '-p 5433 -k /tmp/pgb/sock -c listen_addresses=' -l /tmp/pgb/pg.log start
 ```
 
@@ -60,7 +61,7 @@ internal/
 
   usecase/
     quotes/                        — calls the domain and the ports below; the ports' consumer
-      repository.go                — ports: Repository, Tx (declared here, not in domain)
+      repository.go                — port: Repository (declared here, not in domain)
       provider.go                  — port: RateProvider (GetCurrencyRate(ctx, pair) (quotes.CurrencyRate, error))
       clock.go                     — port: Clock (fake clocks in tests)
       request_update.go            — use case
@@ -73,7 +74,7 @@ internal/
     fake/adapter.go                — implements usecase/quotes.RateProvider fully offline
 
   storage/
-    postgres/                      — embed.FS migrations, pgx pool, implements Repository/Tx
+    postgres/                      — embed.FS migrations, pgx pool, implements Repository
     memory/                        — second implementation of the same ports, for use-case tests
 
   api/http/
@@ -85,7 +86,7 @@ pkg/
   clock/                            — Clock implementations: SystemClock, FakeClock
 ```
 
-**Ports are declared by the consumer.** `Repository`, `Tx`, `RateProvider` and `Clock` live in
+**Ports are declared by the consumer.** `Repository`, `RateProvider` and `Clock` live in
 `internal/usecase/quotes` — that package calls them, so it declares them, not `internal/domain/quotes`.
 Domain stays free of ports entirely: it holds value objects and invariants, nothing that talks to a
 database or an upstream. Adapters (`storage/postgres`, `storage/memory`, `provider/exchangeratedev`,
@@ -119,7 +120,11 @@ at-least-once by design — reading a rate has no side effects.
 **Claim, work and complete are three separate transactions.** They cannot be merged into one
 statement: a CTE's updates are invisible to the rest of the same statement, so an outer `UPDATE`
 that tries to close rows the CTE just claimed silently does nothing and leaves everything in
-`in_progress`. This was observed, not theorised.
+`in_progress`. This was observed, not theorised. Each transaction is opened and committed inside a
+single `Repository` method (claim a batch, mark succeeded, mark failed, reap stuck rows) — no `Tx`
+handle crosses the port boundary. "Work" (the provider call) happens between two of these calls,
+holding no transaction open: a DB transaction should not sit open for the duration of an upstream
+HTTP call.
 
 **Single-flight per pair is a correctness requirement, not an optimisation.** Eight workers can
 claim eight tasks for the same pair, all see a stale quote and all call the upstream. Requests for
@@ -156,8 +161,13 @@ of calling the upstream. Neither replaces the other.
   that `go test ./...` stays green on a machine with no database.
 - The upstream API key comes from the environment only. `exchangerate.dev` serves anonymous
   requests and `PROVIDER=fake` runs the whole service offline — a reviewer must never need a key.
-- Keep the dependency list short (currently pgx, decimal, uuid, goose, testify). A new dependency
-  needs a reason that survives the question "what does this cost in production?".
+- Keep the dependency list short (currently pgx, decimal, goose, testify — `uuid` is part of this
+  project's Go standard library, not a fetched dependency). A new dependency needs a reason that
+  survives the question "what does this cost in production?".
+- **IDs are UUIDv7, never v4.** Generate with `uuid.NewV7()` — `uuid.New()`/`uuid.NewV4()` are
+  disallowed everywhere in this codebase. v7 embeds a timestamp, so `quote_updates` primary-key
+  inserts stay ordered instead of scattering across the B-tree the way random v4 would. Requires
+  PostgreSQL 18+.
 - **No business logic in the database.** Migrations declare columns, types, `PRIMARY KEY`,
   `FOREIGN KEY`, `UNIQUE` and `NOT NULL` only — those are structural/concurrency guarantees the
   application cannot otherwise get atomically (a unique partial index is what makes a concurrent

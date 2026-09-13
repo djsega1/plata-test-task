@@ -35,6 +35,8 @@ linters:
       forbid:
         - pattern: 'time\.Sleep'
           msg: "no time.Sleep: tests use fake clocks (CLAUDE.md), and production code should use a cancellable timer/select instead of a blocking sleep"
+        - pattern: 'uuid\.(New|NewV4)\b'
+          msg: "IDs are UUIDv7 (CLAUDE.md): use uuid.NewV7, not uuid.New/uuid.NewV4"
 
 formatters:
   enable:
