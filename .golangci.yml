@@ -1,0 +1,42 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errcheck
+    - forbidigo
+    - gocritic
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - unconvert
+    - unparam
+    - thelper
+    - tparallel
+    - noctx
+    - nilerr
+    - lll
+    - intrange
+    - iface
+    - importas
+    - modernize
+  settings:
+    errcheck:
+      exclude-functions:
+        - (io.Closer).Close
+    lll:
+      line-length: 150
+    forbidigo:
+      forbid:
+        - pattern: 'time\.Sleep'
+          msg: "no time.Sleep: tests use fake clocks (CLAUDE.md), and production code should use a cancellable timer/select instead of a blocking sleep"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

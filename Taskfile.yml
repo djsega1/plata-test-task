@@ -1,0 +1,60 @@
+version: '3'
+
+tasks:
+  default:
+    desc: Alias for check
+    cmds:
+      - task: check
+
+  build:
+    desc: Build all packages
+    cmds:
+      - go build ./...
+
+  fmt:
+    desc: Check formatting — must print nothing
+    cmds:
+      - gofmt -l .
+
+  fmt:fix:
+    desc: Reformat files in place
+    cmds:
+      - gofmt -w .
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+
+  lint:
+    desc: Run golangci-lint (errcheck, staticcheck, unused, bodyclose, forbidigo, ...)
+    cmds:
+      - golangci-lint run ./...
+
+  lint:fix:
+    desc: Run golangci-lint (errcheck, staticcheck, unused, bodyclose, forbidigo, ...)
+    cmds:
+      - golangci-lint run ./... --fix
+
+  test:
+    desc: Run unit tests — must pass without a database
+    cmds:
+      - go test ./...
+
+  test:race:
+    desc: Run unit tests with the race detector
+    cmds:
+      - go test -race ./...
+
+  test:cover:
+    desc: Run unit tests with coverage
+    cmds:
+      - go test ./... -cover
+
+  check:
+    desc: Everything that must be green before calling a step done
+    cmds:
+      - task: fmt
+      - task: vet
+      - task: lint
+      - task: test
