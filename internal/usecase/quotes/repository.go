@@ -14,6 +14,8 @@ var (
 	// ErrIdempotencyKeyExists: replay (same pair) vs conflict (different
 	// pair) is a use-case decision, not the repository's.
 	ErrIdempotencyKeyExists = errors.New("idempotency key already exists")
+	// ErrIdempotencyConflict: the key was already used for a different pair.
+	ErrIdempotencyConflict = errors.New("idempotency key used with a different pair")
 )
 
 // Repository is the port over the quotes journal and the quote_updates
