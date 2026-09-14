@@ -25,6 +25,17 @@ func (p Provider) valid() bool {
 	}
 }
 
+// Storage selects which Repository adapter cmd/server wires up. Only
+// postgres exists so far; memory is for use-case tests (CLAUDE.md), not
+// yet a runtime option.
+type Storage string
+
+const StoragePostgres Storage = "postgres"
+
+func (s Storage) valid() bool {
+	return s == StoragePostgres
+}
+
 // Config holds the server's runtime configuration.
 type Config struct {
 	HTTPAddr          string
@@ -35,6 +46,8 @@ type Config struct {
 	ShutdownTimeout   time.Duration
 	LogLevel          slog.Level
 	Provider          Provider
+	Storage           Storage
+	DatabaseURL       string
 }
 
 const (
@@ -46,6 +59,7 @@ const (
 	defaultShutdownTimeout   = 10 * time.Second
 	defaultLogLevel          = slog.LevelInfo
 	defaultProvider          = ProviderFake
+	defaultStorage           = StoragePostgres
 )
 
 // Load builds a Config from environment variables, then applies args as
@@ -60,6 +74,7 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		ShutdownTimeout:   defaultShutdownTimeout,
 		LogLevel:          defaultLogLevel,
 		Provider:          defaultProvider,
+		Storage:           defaultStorage,
 	}
 
 	if v := getenv("HTTP_ADDR"); v != "" {
@@ -92,15 +107,29 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		cfg.Provider = Provider(strings.ToLower(v))
 	}
 
+	if v := getenv("STORAGE"); v != "" {
+		cfg.Storage = Storage(strings.ToLower(v))
+	}
+
+	cfg.DatabaseURL = getenv("DATABASE_URL")
+
 	fs := flag.NewFlagSet("server", flag.ContinueOnError)
 	provider := fs.String("provider", string(cfg.Provider), "rate provider: fake or exchangeratedev (overrides PROVIDER env)")
+	storage := fs.String("storage", string(cfg.Storage), "repository backend: postgres (overrides STORAGE env)")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
 	cfg.Provider = Provider(strings.ToLower(*provider))
+	cfg.Storage = Storage(strings.ToLower(*storage))
 
 	if !cfg.Provider.valid() {
 		return Config{}, fmt.Errorf("config: invalid PROVIDER/--provider %q: must be %q or %q", cfg.Provider, ProviderFake, ProviderExchangerateDev)
+	}
+	if !cfg.Storage.valid() {
+		return Config{}, fmt.Errorf("config: invalid STORAGE/--storage %q: must be %q", cfg.Storage, StoragePostgres)
+	}
+	if cfg.Storage == StoragePostgres && cfg.DatabaseURL == "" {
+		return Config{}, fmt.Errorf("config: DATABASE_URL is required when STORAGE/--storage is %q", StoragePostgres)
 	}
 
 	return cfg, nil

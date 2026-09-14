@@ -22,14 +22,14 @@ tasks:
       - gofmt -w .
 
   vet:
-    desc: Run go vet
+    desc: Run go vet, including integration-tagged files (static only, no database needed)
     cmds:
-      - go vet ./...
+      - go vet -tags=integration ./...
 
   lint:
-    desc: Run golangci-lint (errcheck, staticcheck, unused, bodyclose, forbidigo, ...)
+    desc: Run golangci-lint, including integration-tagged files (errcheck, staticcheck, unused, bodyclose, forbidigo, ...)
     cmds:
-      - golangci-lint run ./...
+      - golangci-lint run --build-tags=integration ./...
 
   lint:fix:
     desc: Run golangci-lint (errcheck, staticcheck, unused, bodyclose, forbidigo, ...)
@@ -50,6 +50,11 @@ tasks:
     desc: Run unit tests with coverage
     cmds:
       - go test ./... -cover
+
+  test:integration:
+    desc: Run integration tests against PostgreSQL 18+ — needs TEST_DATABASE_URL, see CLAUDE.md
+    cmds:
+      - go test -tags=integration -race ./...
 
   check:
     desc: Everything that must be green before calling a step done

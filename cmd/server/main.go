@@ -12,6 +12,7 @@ import (
 
 	apihttp "github.com/djsega1/plata-test-task/internal/api/http"
 	"github.com/djsega1/plata-test-task/internal/config"
+	"github.com/djsega1/plata-test-task/internal/storage/postgres"
 )
 
 func main() {
@@ -29,9 +30,21 @@ func run() int {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
 
+	if err := postgres.Migrate(context.Background(), cfg.DatabaseURL); err != nil {
+		logger.Error("migrate", "error", err)
+		return 1
+	}
+
+	pool, err := postgres.NewPool(context.Background(), cfg.DatabaseURL)
+	if err != nil {
+		logger.Error("connect to database", "error", err)
+		return 1
+	}
+	defer pool.Close()
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           apihttp.NewRouter(logger),
+		Handler:           apihttp.NewRouter(logger, pool.Ping),
 		ReadTimeout:       cfg.ReadTimeout,
 		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
 		WriteTimeout:      cfg.WriteTimeout,
@@ -40,7 +53,7 @@ func run() int {
 
 	serveErr := make(chan error, 1)
 	go func() {
-		logger.Info("server starting", "addr", cfg.HTTPAddr, "provider", cfg.Provider)
+		logger.Info("server starting", "addr", cfg.HTTPAddr, "provider", cfg.Provider, "storage", cfg.Storage)
 		serveErr <- srv.ListenAndServe()
 	}()
 

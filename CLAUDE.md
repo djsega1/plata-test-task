@@ -27,8 +27,14 @@ go test ./internal/provider/ -run TestRateParsesResponse    # one test
 go test ./internal/provider/ -run '^$' -bench . -benchtime 2s
 go test ./... -cover
 
+# task vet/lint add -tags=integration: statically covers integration-tagged
+# files too (no database needed for that, only for actually running them)
+task vet
+task lint
+
 # integration tests (need PostgreSQL 18+; skipped when the variable is unset)
 TEST_DATABASE_URL='postgres://postgres@localhost:5432/quotes' go test -tags=integration ./internal/storage/postgres/
+TEST_DATABASE_URL='postgres://postgres@localhost:5432/quotes' task test:integration
 ```
 
 A local cluster when no Docker is available (Debian/Ubuntu paths, PostgreSQL 18+ — see "IDs are
@@ -121,8 +127,10 @@ at-least-once by design — reading a rate has no side effects.
 statement: a CTE's updates are invisible to the rest of the same statement, so an outer `UPDATE`
 that tries to close rows the CTE just claimed silently does nothing and leaves everything in
 `in_progress`. This was observed, not theorised. Each transaction is opened and committed inside a
-single `Repository` method (claim a batch, mark succeeded, mark failed, reap stuck rows) — no `Tx`
-handle crosses the port boundary. "Work" (the provider call) happens between two of these calls,
+single `Repository` method (`ClaimBatch`, `CompleteSuccess`, `CompleteFailure`) — no `Tx` handle
+crosses the port boundary. The reaper is not its own method: `ClaimBatch`'s `WHERE` already covers
+rows stuck in `in_progress` past a visibility cutoff, alongside pending ones, so a reaper pass is
+just another call to the same claim. "Work" (the provider call) happens between two of these calls,
 holding no transaction open: a DB transaction should not sit open for the duration of an upstream
 HTTP call.
 
