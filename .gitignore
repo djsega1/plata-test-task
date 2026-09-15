@@ -30,4 +30,8 @@ go.work.sum
 # Editor/IDE
 # .idea/
 .vscode/
-.claude/
+
+# Claude Code project directory: only checked-in skills are tracked —
+# worktrees, local settings, etc. stay out of the repo.
+.claude/*
+!.claude/skills/

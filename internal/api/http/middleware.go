@@ -43,12 +43,7 @@ func recoverMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 		defer func() {
 			if rec := recover(); rec != nil {
 				logger.Error("panic recovered", "panic", rec, "method", r.Method, "path", r.URL.Path)
-				writeJSON(logger, w, http.StatusInternalServerError, map[string]any{
-					"error": map[string]string{
-						"code":    codeInternalError,
-						"message": "internal server error",
-					},
-				})
+				writeError(logger, w, http.StatusInternalServerError, codeInternalError, msgInternalError)
 			}
 		}()
 		next.ServeHTTP(w, r)

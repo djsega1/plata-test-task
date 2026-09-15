@@ -13,6 +13,40 @@ import (
 // CurrencyRateError must implement error.
 var _ error = quotes.CurrencyRateError{}
 
+func TestCurrencyRateErrorCode_Valid(t *testing.T) {
+	tests := []struct {
+		code quotes.CurrencyRateErrorCode
+		want bool
+	}{
+		{quotes.InvalidRequestError, true},
+		{quotes.UnsupportedPairError, true},
+		{quotes.AuthError, true},
+		{quotes.RateLimitedError, true},
+		{quotes.ProviderUnavailableError, true},
+		{quotes.UnclassifiedProviderError, true},
+		{quotes.MalformedResponseError, true},
+		{quotes.CurrencyRateErrorCode("bogus"), false},
+		{quotes.CurrencyRateErrorCode(""), false},
+	}
+	for _, tt := range tests {
+		if got := tt.code.Valid(); got != tt.want {
+			t.Errorf("CurrencyRateErrorCode(%q).Valid() = %v, want %v", tt.code, got, tt.want)
+		}
+	}
+}
+
+// NewCurrencyRateError panics rather than returning an error for an invalid
+// code (see its doc comment): code is always one of the constants above,
+// supplied by our own code, never parsed from external input.
+func TestNewCurrencyRateError_PanicsOnInvalidCode(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("NewCurrencyRateError did not panic on an invalid code")
+		}
+	}()
+	_ = quotes.NewCurrencyRateError(quotes.CurrencyRateErrorCode("bogus"), "message", false, 0, "")
+}
+
 func TestCurrencyRateError_Accessors(t *testing.T) {
 	err := quotes.NewCurrencyRateError(quotes.RateLimitedError, "too many requests", true, 30*time.Second, "rate_limited")
 

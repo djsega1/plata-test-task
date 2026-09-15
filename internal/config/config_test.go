@@ -48,6 +48,12 @@ func TestLoadDefaults(t *testing.T) {
 		QuoteTTL:           defaultQuoteTTL,
 		RateLimitPerMinute: defaultRateLimitPerMinute,
 		RateLimitPerHour:   defaultRateLimitPerHour,
+
+		DispatchTickInterval:      defaultDispatchTickInterval,
+		DispatchBatchSize:         defaultDispatchBatchSize,
+		DispatchPoolSize:          defaultDispatchPoolSize,
+		DispatchVisibilityTimeout: defaultDispatchVisibilityTimeout,
+		DispatchBaseBackoff:       defaultDispatchBaseBackoff,
 	}
 	assert.Equal(t, want, cfg)
 }
@@ -92,6 +98,24 @@ func TestLoadRateLimitOverrides(t *testing.T) {
 
 	assert.Equal(t, 5, cfg.RateLimitPerMinute)
 	assert.Equal(t, 50, cfg.RateLimitPerHour)
+}
+
+func TestLoadDispatchOverrides(t *testing.T) {
+	env := withEnv(map[string]string{
+		"DISPATCH_TICK_INTERVAL":      "10s",
+		"DISPATCH_BATCH_SIZE":         "50",
+		"DISPATCH_POOL_SIZE":          "4",
+		"DISPATCH_VISIBILITY_TIMEOUT": "1m",
+		"DISPATCH_BASE_BACKOFF":       "2s",
+	})
+	cfg, err := Load(nil, fakeGetenv(env))
+	require.NoError(t, err)
+
+	assert.Equal(t, 10*time.Second, cfg.DispatchTickInterval)
+	assert.Equal(t, 50, cfg.DispatchBatchSize)
+	assert.Equal(t, 4, cfg.DispatchPoolSize)
+	assert.Equal(t, time.Minute, cfg.DispatchVisibilityTimeout)
+	assert.Equal(t, 2*time.Second, cfg.DispatchBaseBackoff)
 }
 
 func TestLoadRateLimitInvalid(t *testing.T) {

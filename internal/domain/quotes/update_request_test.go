@@ -48,11 +48,19 @@ func TestCanTransitionTo(t *testing.T) {
 	}
 }
 
-func TestNewCurrencyRateUpdateRequest(t *testing.T) {
+// testPair is EUR/USD — the specific pair doesn't matter to the tests in
+// this file, they just need one that's known-valid.
+func testPair(t *testing.T) quotes.CurrencyPair {
+	t.Helper()
 	pair, err := quotes.NewCurrencyPair(quotes.CodeEUR, quotes.CodeUSD)
 	if err != nil {
 		t.Fatalf("NewCurrencyPair: unexpected error: %v", err)
 	}
+	return pair
+}
+
+func TestNewCurrencyRateUpdateRequest(t *testing.T) {
+	pair := testPair(t)
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 
 	req := quotes.NewCurrencyRateUpdateRequest(pair, now)
@@ -72,10 +80,7 @@ func TestNewCurrencyRateUpdateRequest(t *testing.T) {
 }
 
 func TestNewCurrencyRateUpdateRequestIDsAreOrdered(t *testing.T) {
-	pair, err := quotes.NewCurrencyPair(quotes.CodeEUR, quotes.CodeUSD)
-	if err != nil {
-		t.Fatalf("NewCurrencyPair: unexpected error: %v", err)
-	}
+	pair := testPair(t)
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 
 	first := quotes.NewCurrencyRateUpdateRequest(pair, now)
@@ -87,10 +92,7 @@ func TestNewCurrencyRateUpdateRequestIDsAreOrdered(t *testing.T) {
 }
 
 func TestCurrencyRateUpdateRequestTransitionTo(t *testing.T) {
-	pair, err := quotes.NewCurrencyPair(quotes.CodeEUR, quotes.CodeUSD)
-	if err != nil {
-		t.Fatalf("NewCurrencyPair: unexpected error: %v", err)
-	}
+	pair := testPair(t)
 	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	req := quotes.NewCurrencyRateUpdateRequest(pair, created)
 

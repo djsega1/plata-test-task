@@ -201,6 +201,34 @@ func TestCompleteSuccess(t *testing.T) {
 	assert.True(t, rate.Value.Equal(latest.Value))
 }
 
+// TestCompleteSuccess_ClearsPriorFailure covers a request that failed once
+// (retryable), requeued, and then succeeded: it must not keep reporting its
+// earlier attempt's error once read back.
+func TestCompleteSuccess_ClearsPriorFailure(t *testing.T) {
+	pool := newTestPool(t)
+	repo := postgres.NewRepository(pool)
+	ctx := t.Context()
+	now := testNow
+	pair := testPair(t)
+
+	req := domainquotes.NewCurrencyRateUpdateRequest(pair, now)
+	require.NoError(t, repo.CreateUpdateRequest(ctx, req, ""))
+	_, err := repo.ClaimBatch(ctx, 10, now, now.Add(-time.Hour))
+	require.NoError(t, err)
+	require.NoError(t, repo.CompleteFailure(ctx, req.ID, "provider_unavailable", "upstream 503", true, now, now))
+
+	_, err = repo.ClaimBatch(ctx, 10, now, now.Add(-time.Hour))
+	require.NoError(t, err)
+	require.NoError(t, repo.CompleteSuccess(ctx, req.ID, pair, testRate(t, now), now))
+
+	gotReq, _, err := repo.GetUpdateByID(ctx, req.ID)
+	require.NoError(t, err)
+	assert.Equal(t, domainquotes.StatusSucceeded, gotReq.Status)
+	assert.Empty(t, gotReq.ErrorCode)
+	assert.Empty(t, gotReq.ErrorMessage)
+	assert.Equal(t, 2, gotReq.Attempts, "Attempts keeps accumulating even though the error is cleared")
+}
+
 func TestCompleteSuccess_DedupsSameQuotedAt(t *testing.T) {
 	pool := newTestPool(t)
 	repo := postgres.NewRepository(pool)
@@ -265,14 +293,13 @@ func TestCompleteFailure_Retryable(t *testing.T) {
 	got, _, err := repo.GetUpdateByID(ctx, req.ID)
 	require.NoError(t, err)
 	assert.Equal(t, domainquotes.StatusPending, got.Status)
+	assert.Equal(t, "provider_unavailable", got.ErrorCode)
+	assert.Equal(t, "upstream 503", got.ErrorMessage)
 
-	var errCode, errMessage string
 	var storedNextAttempt time.Time
 	require.NoError(t, pool.QueryRow(ctx,
-		"SELECT error_code, error_message, next_attempt_at FROM quote_updates WHERE id = $1", req.ID,
-	).Scan(&errCode, &errMessage, &storedNextAttempt))
-	assert.Equal(t, "provider_unavailable", errCode)
-	assert.Equal(t, "upstream 503", errMessage)
+		"SELECT next_attempt_at FROM quote_updates WHERE id = $1", req.ID,
+	).Scan(&storedNextAttempt))
 	// Postgres TIMESTAMPTZ is microsecond precision, time.Now() is
 	// nanosecond — exact .Equal would flake on the round trip.
 	assert.WithinDuration(t, nextAttempt, storedNextAttempt, time.Millisecond)
@@ -295,13 +322,8 @@ func TestCompleteFailure_NotRetryable(t *testing.T) {
 	got, _, err := repo.GetUpdateByID(ctx, req.ID)
 	require.NoError(t, err)
 	assert.Equal(t, domainquotes.StatusFailed, got.Status)
-
-	var errCode, errMessage string
-	require.NoError(t, pool.QueryRow(ctx,
-		"SELECT error_code, error_message FROM quote_updates WHERE id = $1", req.ID,
-	).Scan(&errCode, &errMessage))
-	assert.Equal(t, "unsupported_pair", errCode)
-	assert.Equal(t, "no rate for pair", errMessage)
+	assert.Equal(t, "unsupported_pair", got.ErrorCode)
+	assert.Equal(t, "no rate for pair", got.ErrorMessage)
 }
 
 func TestGetLatestQuote_NotFound(t *testing.T) {

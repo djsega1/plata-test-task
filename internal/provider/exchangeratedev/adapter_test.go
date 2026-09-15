@@ -13,7 +13,7 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-func mustPair(t *testing.T, base, quote quotes.CurrencyCode) quotes.CurrencyPair {
+func testPair(t *testing.T, base, quote quotes.CurrencyCode) quotes.CurrencyPair {
 	t.Helper()
 	pair, err := quotes.NewCurrencyPair(base, quote)
 	if err != nil {
@@ -57,7 +57,7 @@ func TestGetCurrencyRate_Success(t *testing.T) {
 	defer srv.Close()
 
 	provider := exchangeratedev.NewExchangerateDevProvider(srv.URL, "", srv.Client(), 5*time.Minute)
-	pair := mustPair(t, quotes.CodeEUR, quotes.CodeUSD)
+	pair := testPair(t, quotes.CodeEUR, quotes.CodeUSD)
 
 	rate, err := provider.GetCurrencyRate(context.Background(), pair)
 	if err != nil {
@@ -127,7 +127,7 @@ func TestGetCurrencyRate_SendsBearerToken(t *testing.T) {
 	defer srv.Close()
 
 	provider := exchangeratedev.NewExchangerateDevProvider(srv.URL, "secret-key", srv.Client(), 5*time.Minute)
-	pair := mustPair(t, quotes.CodeUSD, quotes.CodeEUR)
+	pair := testPair(t, quotes.CodeUSD, quotes.CodeEUR)
 
 	if _, err := provider.GetCurrencyRate(context.Background(), pair); err != nil {
 		t.Fatalf("GetCurrencyRate: unexpected error: %v", err)
@@ -171,7 +171,7 @@ func TestGetCurrencyRate_RateLimited(t *testing.T) {
 			defer srv.Close()
 
 			provider := exchangeratedev.NewExchangerateDevProvider(srv.URL, "", srv.Client(), 5*time.Minute)
-			pair := mustPair(t, quotes.CodeEUR, quotes.CodeMXN)
+			pair := testPair(t, quotes.CodeEUR, quotes.CodeMXN)
 
 			_, err := provider.GetCurrencyRate(context.Background(), pair)
 			rateErr := mustRateError(t, err)
@@ -213,7 +213,7 @@ func TestGetCurrencyRate_ClassifiedProviderErrors(t *testing.T) {
 			defer srv.Close()
 
 			provider := exchangeratedev.NewExchangerateDevProvider(srv.URL, "", srv.Client(), 5*time.Minute)
-			pair := mustPair(t, quotes.CodeEUR, quotes.CodeMXN)
+			pair := testPair(t, quotes.CodeEUR, quotes.CodeMXN)
 
 			_, err := provider.GetCurrencyRate(context.Background(), pair)
 			rateErr := mustRateError(t, err)
@@ -239,7 +239,7 @@ func TestGetCurrencyRate_UnclassifiedProviderCode(t *testing.T) {
 	defer srv.Close()
 
 	provider := exchangeratedev.NewExchangerateDevProvider(srv.URL, "", srv.Client(), 5*time.Minute)
-	pair := mustPair(t, quotes.CodeEUR, quotes.CodeMXN)
+	pair := testPair(t, quotes.CodeEUR, quotes.CodeMXN)
 
 	_, err := provider.GetCurrencyRate(context.Background(), pair)
 	rateErr := mustRateError(t, err)
@@ -260,7 +260,7 @@ func TestGetCurrencyRate_MalformedSuccessBody(t *testing.T) {
 	defer srv.Close()
 
 	provider := exchangeratedev.NewExchangerateDevProvider(srv.URL, "", srv.Client(), 5*time.Minute)
-	pair := mustPair(t, quotes.CodeEUR, quotes.CodeMXN)
+	pair := testPair(t, quotes.CodeEUR, quotes.CodeMXN)
 
 	_, err := provider.GetCurrencyRate(context.Background(), pair)
 	rateErr := mustRateError(t, err)
@@ -281,7 +281,7 @@ func TestGetCurrencyRate_MalformedErrorBody(t *testing.T) {
 	defer srv.Close()
 
 	provider := exchangeratedev.NewExchangerateDevProvider(srv.URL, "", srv.Client(), 5*time.Minute)
-	pair := mustPair(t, quotes.CodeEUR, quotes.CodeMXN)
+	pair := testPair(t, quotes.CodeEUR, quotes.CodeMXN)
 
 	_, err := provider.GetCurrencyRate(context.Background(), pair)
 	rateErr := mustRateError(t, err)
@@ -302,7 +302,7 @@ func TestGetCurrencyRate_ContextCancelled(t *testing.T) {
 	defer srv.Close()
 
 	provider := exchangeratedev.NewExchangerateDevProvider(srv.URL, "", srv.Client(), 5*time.Minute)
-	pair := mustPair(t, quotes.CodeEUR, quotes.CodeMXN)
+	pair := testPair(t, quotes.CodeEUR, quotes.CodeMXN)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancelled before the call

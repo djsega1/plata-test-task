@@ -9,10 +9,13 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	apihttp "github.com/djsega1/plata-test-task/internal/api/http"
 	"github.com/djsega1/plata-test-task/internal/config"
 	"github.com/djsega1/plata-test-task/internal/storage/postgres"
+	"github.com/djsega1/plata-test-task/internal/usecase/quotes"
+	"github.com/djsega1/plata-test-task/pkg/clock"
 )
 
 func main() {
@@ -42,9 +45,51 @@ func run() int {
 	}
 	defer pool.Close()
 
+	provider, err := newRateProvider(cfg)
+	if err != nil {
+		logger.Error("provider", "error", err)
+		return 1
+	}
+
+	repo := postgres.NewRepository(pool)
+	sysClock := clock.NewSystemClock()
+	limiter := quotes.NewRateLimiter(cfg.RateLimitPerMinute, cfg.RateLimitPerHour)
+	worker := quotes.NewWorker(repo, provider, sysClock, limiter, cfg.DispatchBaseBackoff)
+	dispatcher := quotes.NewDispatcher(
+		repo, sysClock, worker, logger, cfg.DispatchBatchSize, cfg.DispatchPoolSize, cfg.DispatchVisibilityTimeout,
+	)
+
+	// nudge is buffered by one: a POST that arrives while a claim-and-dispatch
+	// pass is already running still leaves a pending signal for the next
+	// pass, without blocking the HTTP response on it (see
+	// api/http.postQuotesUpdatesHandler). Extra nudges beyond that just fall
+	// through to the next tick, which is exactly the tick's job.
+	nudge := make(chan struct{}, 1)
+	ticker := time.NewTicker(cfg.DispatchTickInterval)
+	defer ticker.Stop()
+
+	dispatchCtx, stopDispatch := context.WithCancel(context.Background())
+	dispatchDone := make(chan struct{})
+	go func() {
+		defer close(dispatchDone)
+		dispatcher.Run(dispatchCtx, nudge, ticker.C)
+	}()
+	// stopDispatch cancels dispatchCtx, which only stops Run from starting
+	// another pass — Run itself detaches ClaimAndDispatch from that
+	// cancellation (see usecase/quotes/dispatcher.go), so a pass already in
+	// flight keeps running and Run only returns once it has completed.
+	// Waiting on dispatchDone here, rather than just calling stopDispatch,
+	// is what actually lets that in-flight pass finish instead of abandoning
+	// claimed rows mid-flight. Deferred once here so every return path below
+	// waits for it, instead of each one calling it by hand.
+	defer func() {
+		stopDispatch()
+		<-dispatchDone
+	}()
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           apihttp.NewRouter(logger, pool.Ping),
+		Handler:           apihttp.NewRouter(logger, pool.Ping, repo, sysClock, nudge),
 		ReadTimeout:       cfg.ReadTimeout,
 		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
 		WriteTimeout:      cfg.WriteTimeout,

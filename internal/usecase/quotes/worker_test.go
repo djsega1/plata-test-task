@@ -1,8 +1,6 @@
 package quotes_test
 
 import (
-	"context"
-	"sync"
 	"testing"
 	"time"
 
@@ -15,56 +13,6 @@ import (
 	"github.com/djsega1/plata-test-task/internal/usecase/quotes"
 	"github.com/djsega1/plata-test-task/pkg/clock"
 )
-
-// countingProvider is a hand-written RateProvider test double. It counts
-// calls and can optionally block each call on a gate and/or announce each
-// call on arrived, for concurrency tests.
-type countingProvider struct {
-	mu    sync.Mutex
-	calls int
-
-	rate quotes.ProviderQuote
-	err  error
-
-	gate    chan struct{} // nil: don't block
-	arrived chan struct{} // nil: don't announce
-}
-
-func (p *countingProvider) GetCurrencyRate(_ context.Context, _ domainquotes.CurrencyPair) (quotes.ProviderQuote, error) {
-	p.mu.Lock()
-	p.calls++
-	p.mu.Unlock()
-
-	if p.arrived != nil {
-		p.arrived <- struct{}{}
-	}
-	if p.gate != nil {
-		<-p.gate
-	}
-	if p.err != nil {
-		return quotes.ProviderQuote{}, p.err
-	}
-	return p.rate, nil
-}
-
-func (p *countingProvider) Provider() string { return "test-provider" }
-func (p *countingProvider) Indicative() bool { return true }
-func (p *countingProvider) StaleAfter(_ string, quotedAt time.Time) time.Time {
-	return quotedAt.Add(time.Minute)
-}
-
-func (p *countingProvider) callCount() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.calls
-}
-
-func testUpdatePair(t *testing.T) domainquotes.CurrencyPair {
-	t.Helper()
-	pair, err := domainquotes.NewCurrencyPair(domainquotes.CodeEUR, domainquotes.CodeUSD)
-	require.NoError(t, err)
-	return pair
-}
 
 // claimOne creates one pending request and claims it, returning the
 // now-in_progress row Worker.Process expects.
@@ -81,7 +29,7 @@ func claimOne(t *testing.T, repo *memory.Repository, pair domainquotes.CurrencyP
 func TestWorker_Process_PendingToSucceeded(t *testing.T) {
 	repo := memory.NewRepository()
 	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-	pair := testUpdatePair(t)
+	pair := testPair(t)
 
 	provider := &countingProvider{rate: quotes.ProviderQuote{
 		Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now(),
@@ -103,7 +51,7 @@ func TestWorker_Process_PendingToSucceeded(t *testing.T) {
 func TestWorker_Process_ReusesFreshQuoteWithoutCallingProvider(t *testing.T) {
 	repo := memory.NewRepository()
 	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-	pair := testUpdatePair(t)
+	pair := testPair(t)
 
 	provider := &countingProvider{rate: quotes.ProviderQuote{
 		Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now(),
@@ -131,7 +79,7 @@ func TestWorker_Process_ReusesFreshQuoteWithoutCallingProvider(t *testing.T) {
 func TestWorker_Process_RetryableFailureDefersWithBackoff(t *testing.T) {
 	repo := memory.NewRepository()
 	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-	pair := testUpdatePair(t)
+	pair := testPair(t)
 
 	provider := &countingProvider{err: domainquotes.NewCurrencyRateError(
 		domainquotes.ProviderUnavailableError, "upstream down", true, 30*time.Second, "",
@@ -159,7 +107,7 @@ func TestWorker_Process_RetryableFailureDefersWithBackoff(t *testing.T) {
 func TestWorker_Process_PermanentFailureFails(t *testing.T) {
 	repo := memory.NewRepository()
 	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-	pair := testUpdatePair(t)
+	pair := testPair(t)
 
 	provider := &countingProvider{err: domainquotes.NewCurrencyRateError(
 		domainquotes.UnsupportedPairError, "no rate for pair", false, 0, "",
@@ -177,7 +125,7 @@ func TestWorker_Process_PermanentFailureFails(t *testing.T) {
 func TestWorker_Process_RateLimitedDefersWithoutCallingProvider(t *testing.T) {
 	repo := memory.NewRepository()
 	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-	pair := testUpdatePair(t)
+	pair := testPair(t)
 
 	provider := &countingProvider{rate: quotes.ProviderQuote{
 		Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now(),
@@ -201,7 +149,7 @@ func TestWorker_Process_RateLimitedDefersWithoutCallingProvider(t *testing.T) {
 func TestWorker_Process_InvalidRateFromProviderFails(t *testing.T) {
 	repo := memory.NewRepository()
 	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-	pair := testUpdatePair(t)
+	pair := testPair(t)
 
 	provider := &countingProvider{rate: quotes.ProviderQuote{
 		Value: decimal.Zero, Quality: "live", QuotedAt: fc.Now(),

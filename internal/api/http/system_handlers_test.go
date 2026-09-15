@@ -12,6 +12,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/djsega1/plata-test-task/internal/storage/memory"
 )
 
 func discardLogger() *slog.Logger {
@@ -20,8 +22,14 @@ func discardLogger() *slog.Logger {
 
 func alwaysReady(context.Context) error { return nil }
 
+// healthzRouter builds a router for the health-check tests below, which
+// don't exercise the business endpoints and so don't care what backs them.
+func healthzRouter(ready func(context.Context) error) http.Handler {
+	return NewRouter(discardLogger(), ready, memory.NewRepository(), nil, nil)
+}
+
 func TestHealthz(t *testing.T) {
-	router := NewRouter(discardLogger(), alwaysReady)
+	router := healthzRouter(alwaysReady)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
@@ -36,7 +44,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestHealthzWrongMethod(t *testing.T) {
-	router := NewRouter(discardLogger(), alwaysReady)
+	router := healthzRouter(alwaysReady)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/healthz", nil)
 	rec := httptest.NewRecorder()
@@ -46,7 +54,7 @@ func TestHealthzWrongMethod(t *testing.T) {
 }
 
 func TestReadyz(t *testing.T) {
-	router := NewRouter(discardLogger(), alwaysReady)
+	router := healthzRouter(alwaysReady)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/readyz", nil)
 	rec := httptest.NewRecorder()
@@ -61,7 +69,7 @@ func TestReadyz(t *testing.T) {
 
 func TestReadyzNotReady(t *testing.T) {
 	notReady := func(context.Context) error { return errors.New("db unreachable") }
-	router := NewRouter(discardLogger(), notReady)
+	router := healthzRouter(notReady)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/readyz", nil)
 	rec := httptest.NewRecorder()
@@ -71,7 +79,7 @@ func TestReadyzNotReady(t *testing.T) {
 }
 
 func TestUnknownRoute(t *testing.T) {
-	router := NewRouter(discardLogger(), alwaysReady)
+	router := healthzRouter(alwaysReady)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/nope", nil)
 	rec := httptest.NewRecorder()

@@ -1,6 +1,7 @@
 package quotes_test
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/djsega1/plata-test-task/internal/domain/quotes"
@@ -21,20 +22,23 @@ func TestNewCurrencyPair(t *testing.T) {
 	})
 
 	t.Run("invalid base", func(t *testing.T) {
-		if _, err := quotes.NewCurrencyPair(quotes.CurrencyCode("GBP"), quotes.CodeUSD); err == nil {
-			t.Error("want error for invalid base code")
+		_, err := quotes.NewCurrencyPair(quotes.CurrencyCode("GBP"), quotes.CodeUSD)
+		if !errors.Is(err, quotes.ErrPairNotAllowed) {
+			t.Errorf("want ErrPairNotAllowed for invalid base code, got %v", err)
 		}
 	})
 
 	t.Run("invalid quote", func(t *testing.T) {
-		if _, err := quotes.NewCurrencyPair(quotes.CodeUSD, quotes.CurrencyCode("GBP")); err == nil {
-			t.Error("want error for invalid quote code")
+		_, err := quotes.NewCurrencyPair(quotes.CodeUSD, quotes.CurrencyCode("GBP"))
+		if !errors.Is(err, quotes.ErrPairNotAllowed) {
+			t.Errorf("want ErrPairNotAllowed for invalid quote code, got %v", err)
 		}
 	})
 
 	t.Run("base equals quote", func(t *testing.T) {
-		if _, err := quotes.NewCurrencyPair(quotes.CodeUSD, quotes.CodeUSD); err == nil {
-			t.Error("want error for base == quote — a currency has no rate against itself")
+		_, err := quotes.NewCurrencyPair(quotes.CodeUSD, quotes.CodeUSD)
+		if !errors.Is(err, quotes.ErrPairNotAllowed) {
+			t.Errorf("want ErrPairNotAllowed for base == quote — a currency has no rate against itself, got %v", err)
 		}
 	})
 }
@@ -83,20 +87,30 @@ func TestParseCurrencyPair(t *testing.T) {
 	})
 
 	t.Run("no separator in input", func(t *testing.T) {
-		if _, err := quotes.ParseCurrencyPair("EURMXN", "/"); err == nil {
-			t.Error("want error: no separator found")
+		_, err := quotes.ParseCurrencyPair("EURMXN", "/")
+		if !errors.Is(err, quotes.ErrMalformedPair) {
+			t.Errorf("want ErrMalformedPair: no separator found, got %v", err)
 		}
 	})
 
 	t.Run("too many parts", func(t *testing.T) {
-		if _, err := quotes.ParseCurrencyPair("EUR/MXN/USD", "/"); err == nil {
-			t.Error("want error: more than two parts")
+		_, err := quotes.ParseCurrencyPair("EUR/MXN/USD", "/")
+		if !errors.Is(err, quotes.ErrMalformedPair) {
+			t.Errorf("want ErrMalformedPair: more than two parts, got %v", err)
+		}
+	})
+
+	t.Run("empty segment", func(t *testing.T) {
+		_, err := quotes.ParseCurrencyPair("/MXN", "/")
+		if !errors.Is(err, quotes.ErrMalformedPair) {
+			t.Errorf("want ErrMalformedPair: empty base segment, got %v", err)
 		}
 	})
 
 	t.Run("invalid code", func(t *testing.T) {
-		if _, err := quotes.ParseCurrencyPair("EUR/GBP", "/"); err == nil {
-			t.Error("want error for a quote code outside the allow-list")
+		_, err := quotes.ParseCurrencyPair("EUR/GBP", "/")
+		if !errors.Is(err, quotes.ErrPairNotAllowed) {
+			t.Errorf("want ErrPairNotAllowed for a quote code outside the allow-list, got %v", err)
 		}
 	})
 }

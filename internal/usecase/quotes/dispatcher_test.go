@@ -44,7 +44,7 @@ func allPairs(t *testing.T) []domainquotes.CurrencyPair {
 func TestDispatcher_ClaimAndDispatch_PendingToSucceeded(t *testing.T) {
 	repo := memory.NewRepository()
 	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-	pair := testUpdatePair(t)
+	pair := testPair(t)
 
 	require.NoError(t, repo.CreateUpdateRequest(t.Context(), domainquotes.NewCurrencyRateUpdateRequest(pair, fc.Now()), ""))
 
@@ -61,6 +61,44 @@ func TestDispatcher_ClaimAndDispatch_PendingToSucceeded(t *testing.T) {
 	assert.True(t, decimal.RequireFromString("1.08").Equal(got.Value))
 }
 
+// TestDispatcher_PanicInOneUpdateDoesNotStopTheBatch simulates a bug deep in
+// GetCurrencyRate (worst case: NewCurrencyRateError panicking on an invalid
+// code — see errors.go) panicking instead of returning. ClaimAndDispatch
+// must recover it, same as any other Worker.Process failure: logged, that
+// one row left in_progress for the reaper, everything else in the batch
+// still completes.
+func TestDispatcher_PanicInOneUpdateDoesNotStopTheBatch(t *testing.T) {
+	repo := memory.NewRepository()
+	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	pairs := allPairs(t)
+	panicPair, okPair := pairs[0], pairs[1]
+
+	panicReq := domainquotes.NewCurrencyRateUpdateRequest(panicPair, fc.Now())
+	require.NoError(t, repo.CreateUpdateRequest(t.Context(), panicReq, ""))
+	okReq := domainquotes.NewCurrencyRateUpdateRequest(okPair, fc.Now())
+	require.NoError(t, repo.CreateUpdateRequest(t.Context(), okReq, ""))
+
+	provider := &countingProvider{
+		panicPair: &panicPair,
+		rate:      quotes.ProviderQuote{Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now()},
+	}
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), time.Second)
+	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), 10, 4, time.Hour)
+
+	require.NotPanics(t, func() {
+		assert.NoError(t, dispatcher.ClaimAndDispatch(t.Context()))
+	})
+
+	gotOK, _, err := repo.GetUpdateByID(t.Context(), okReq.ID)
+	require.NoError(t, err)
+	assert.Equal(t, domainquotes.StatusSucceeded, gotOK.Status, "a panic in one row must not stop the rest of the batch")
+
+	gotPanicked, _, err := repo.GetUpdateByID(t.Context(), panicReq.ID)
+	require.NoError(t, err)
+	assert.Equal(t, domainquotes.StatusInProgress, gotPanicked.Status,
+		"same outcome as any other unrecorded Worker.Process failure: left in_progress for the reaper")
+}
+
 // TestDispatcher_SamePairSingleFlightsToOneProviderCall claims 100 pending
 // requests for one pair and proves the provider is called exactly once.
 // It drives Worker.Process directly (not through the dispatcher's pool) so
@@ -73,7 +111,7 @@ func TestDispatcher_ClaimAndDispatch_PendingToSucceeded(t *testing.T) {
 func TestDispatcher_SamePairSingleFlightsToOneProviderCall(t *testing.T) {
 	repo := memory.NewRepository()
 	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-	pair := testUpdatePair(t)
+	pair := testPair(t)
 
 	const numRequests = 100
 	for range numRequests {
@@ -194,7 +232,7 @@ func TestDispatcher_DifferentPairsRunConcurrently(t *testing.T) {
 func TestDispatcher_ExhaustedBudgetDefersWithoutFailing(t *testing.T) {
 	repo := memory.NewRepository()
 	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-	pair := testUpdatePair(t)
+	pair := testPair(t)
 
 	req := domainquotes.NewCurrencyRateUpdateRequest(pair, fc.Now())
 	require.NoError(t, repo.CreateUpdateRequest(t.Context(), req, ""))
@@ -225,7 +263,7 @@ func TestDispatcher_ExhaustedBudgetDefersWithoutFailing(t *testing.T) {
 func TestDispatcher_Run(t *testing.T) {
 	repo := memory.NewRepository()
 	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-	pair := testUpdatePair(t)
+	pair := testPair(t)
 
 	req := domainquotes.NewCurrencyRateUpdateRequest(pair, fc.Now())
 	require.NoError(t, repo.CreateUpdateRequest(t.Context(), req, ""))
@@ -264,6 +302,72 @@ func TestDispatcher_Run(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after ctx cancellation")
 	}
+}
+
+// TestDispatcher_Run_CancelDuringPassDoesNotAbortIt guards the bug found in
+// cmd/server/main.go's shutdown: the context Run passes into ClaimAndDispatch
+// must survive Run's own ctx being cancelled, so an in-flight pass finishes
+// instead of having its upstream call cut out from under it. Cancelling ctx
+// while GetCurrencyRate is parked on the gate must leave that call's own
+// context un-done; releasing the gate afterwards must still let the request
+// reach StatusSucceeded, not abandon it in_progress.
+func TestDispatcher_Run_CancelDuringPassDoesNotAbortIt(t *testing.T) {
+	repo := memory.NewRepository()
+	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	pair := testPair(t)
+
+	req := domainquotes.NewCurrencyRateUpdateRequest(pair, fc.Now())
+	require.NoError(t, repo.CreateUpdateRequest(t.Context(), req, ""))
+
+	provider := &countingProvider{
+		gate:    make(chan struct{}),
+		arrived: make(chan struct{}),
+		rate: quotes.ProviderQuote{
+			Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now(),
+		},
+	}
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), time.Second)
+	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), 10, 4, time.Hour)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	nudge := make(chan struct{})
+	tick := make(chan time.Time)
+
+	runReturned := make(chan struct{})
+	go func() {
+		dispatcher.Run(ctx, nudge, tick)
+		close(runReturned)
+	}()
+
+	sendOrFail(t, nudge, struct{}{}, "Run never became ready to receive the nudge")
+
+	select {
+	case <-provider.arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("GetCurrencyRate never arrived")
+	}
+
+	cancel()
+	select {
+	case <-runReturned:
+		t.Fatal("Run returned while its own ClaimAndDispatch pass was still in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	assert.NoError(t, provider.lastCallCtx().Err(),
+		"the in-flight upstream call's context must not be cancelled by Run's own ctx")
+
+	close(provider.gate)
+	select {
+	case <-runReturned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after the in-flight pass finished")
+	}
+
+	gotReq, _, err := repo.GetUpdateByID(t.Context(), req.ID)
+	require.NoError(t, err)
+	assert.Equal(t, domainquotes.StatusSucceeded, gotReq.Status,
+		"a pass already in flight when ctx is cancelled must still complete, not be left in_progress")
 }
 
 // sendOrFail sends v on ch, failing the test instead of hanging forever if

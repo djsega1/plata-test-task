@@ -38,9 +38,11 @@ func scanUpdateRequest(row scanner) (domainquotes.CurrencyRateUpdateRequest, err
 	var (
 		id                   uuid.UUID
 		base, quote, status  string
+		attempts             int
+		errCode, errMessage  *string
 		createdAt, updatedAt time.Time
 	)
-	if err := row.Scan(&id, &base, &quote, &status, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&id, &base, &quote, &status, &attempts, &errCode, &errMessage, &createdAt, &updatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return domainquotes.CurrencyRateUpdateRequest{}, quotes.ErrNotFound
 		}
@@ -52,12 +54,25 @@ func scanUpdateRequest(row scanner) (domainquotes.CurrencyRateUpdateRequest, err
 		return domainquotes.CurrencyRateUpdateRequest{}, fmt.Errorf("postgres: invalid pair in row: %w", err)
 	}
 	return domainquotes.CurrencyRateUpdateRequest{
-		ID:        id,
-		Pair:      pair,
-		Status:    domainquotes.CurrencyRateUpdateStatus(status),
-		CreatedAt: createdAt,
-		UpdatedAt: updatedAt,
+		ID:           id,
+		Pair:         pair,
+		Status:       domainquotes.CurrencyRateUpdateStatus(status),
+		Attempts:     attempts,
+		CreatedAt:    createdAt,
+		UpdatedAt:    updatedAt,
+		ErrorCode:    derefOrEmpty(errCode),
+		ErrorMessage: derefOrEmpty(errMessage),
 	}, nil
+}
+
+// derefOrEmpty reads a nullable TEXT column: NULL (nil) becomes "", matching
+// domainquotes.CurrencyRateUpdateRequest's zero value for a request that
+// never failed.
+func derefOrEmpty(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 func (r *Repository) CreateUpdateRequest(ctx context.Context, req domainquotes.CurrencyRateUpdateRequest, idempotencyKey string) error {
@@ -77,7 +92,7 @@ func (r *Repository) CreateUpdateRequest(ctx context.Context, req domainquotes.C
 
 func (r *Repository) GetByIdempotencyKey(ctx context.Context, key string) (domainquotes.CurrencyRateUpdateRequest, error) {
 	row := r.pool.QueryRow(ctx, `
-		SELECT id, base, quote, status, created_at, updated_at
+		SELECT id, base, quote, status, attempts, error_code, error_message, created_at, updated_at
 		FROM quote_updates
 		WHERE idempotency_key = $1
 	`, key)
@@ -100,7 +115,7 @@ func (r *Repository) ClaimBatch(ctx context.Context, limit int, now, visibleSinc
 		SET status = 'in_progress', locked_at = $2, updated_at = $2, attempts = attempts + 1
 		FROM claimed
 		WHERE qu.id = claimed.id
-		RETURNING qu.id, qu.base, qu.quote, qu.status, qu.created_at, qu.updated_at
+		RETURNING qu.id, qu.base, qu.quote, qu.status, qu.attempts, qu.error_code, qu.error_message, qu.created_at, qu.updated_at
 	`, limit, now, visibleSince)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: claim batch: %w", err)
@@ -142,9 +157,12 @@ func (r *Repository) CompleteSuccess(
 		return fmt.Errorf("postgres: complete success: upsert quote: %w", err)
 	}
 
+	// error_code/error_message are cleared here too: a request that failed
+	// once (retryable), requeued, and now succeeds must not keep reporting
+	// its earlier attempt's error once it's read back.
 	tag, err := tx.Exec(ctx, `
 		UPDATE quote_updates
-		SET status = 'succeeded', quote_id = $2, updated_at = $3
+		SET status = 'succeeded', quote_id = $2, updated_at = $3, error_code = NULL, error_message = NULL
 		WHERE id = $1 AND status = 'in_progress'
 	`, id, quoteID, now)
 	if err != nil {
@@ -190,6 +208,8 @@ func (r *Repository) GetUpdateByID(ctx context.Context, id uuid.UUID) (domainquo
 	var (
 		reqID                           uuid.UUID
 		base, quote, status             string
+		attempts                        int
+		errCode, errMessage             *string
 		createdAt, updatedAt            time.Time
 		rateStr                         *string
 		derived, indicative             *bool
@@ -197,12 +217,12 @@ func (r *Repository) GetUpdateByID(ctx context.Context, id uuid.UUID) (domainquo
 		quotedAt, fetchedAt, staleAfter *time.Time
 	)
 	err := r.pool.QueryRow(ctx, `
-		SELECT qu.id, qu.base, qu.quote, qu.status, qu.created_at, qu.updated_at,
+		SELECT qu.id, qu.base, qu.quote, qu.status, qu.attempts, qu.error_code, qu.error_message, qu.created_at, qu.updated_at,
 		       q.rate::text, q.derived, q.indicative, q.provider, q.quality, q.quoted_at, q.fetched_at, q.stale_after
 		FROM quote_updates qu
 		LEFT JOIN quotes q ON q.id = qu.quote_id
 		WHERE qu.id = $1
-	`, id).Scan(&reqID, &base, &quote, &status, &createdAt, &updatedAt,
+	`, id).Scan(&reqID, &base, &quote, &status, &attempts, &errCode, &errMessage, &createdAt, &updatedAt,
 		&rateStr, &derived, &indicative, &provider, &quality, &quotedAt, &fetchedAt, &staleAfter)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -216,11 +236,14 @@ func (r *Repository) GetUpdateByID(ctx context.Context, id uuid.UUID) (domainquo
 		return domainquotes.CurrencyRateUpdateRequest{}, nil, fmt.Errorf("postgres: invalid pair in row: %w", err)
 	}
 	req := domainquotes.CurrencyRateUpdateRequest{
-		ID:        reqID,
-		Pair:      pair,
-		Status:    domainquotes.CurrencyRateUpdateStatus(status),
-		CreatedAt: createdAt,
-		UpdatedAt: updatedAt,
+		ID:           reqID,
+		Pair:         pair,
+		Status:       domainquotes.CurrencyRateUpdateStatus(status),
+		Attempts:     attempts,
+		CreatedAt:    createdAt,
+		UpdatedAt:    updatedAt,
+		ErrorCode:    derefOrEmpty(errCode),
+		ErrorMessage: derefOrEmpty(errMessage),
 	}
 
 	if rateStr == nil {

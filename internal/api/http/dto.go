@@ -1,0 +1,114 @@
+package http
+
+import (
+	"time"
+
+	domainquotes "github.com/djsega1/plata-test-task/internal/domain/quotes"
+)
+
+// errorEnvelope is the single error shape for every non-2xx response
+// (docs/design.md §4): {"error":{"code":"...","message":"..."}}.
+type errorEnvelope struct {
+	Error errorBody `json:"error"`
+}
+
+type errorBody struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+func newErrorEnvelope(code, message string) errorEnvelope {
+	return errorEnvelope{Error: errorBody{Code: code, Message: message}}
+}
+
+// createUpdateRequest is POST /quotes/updates' body.
+type createUpdateRequest struct {
+	Pair string `json:"pair"`
+}
+
+// createUpdateResponse is POST /quotes/updates' 202 (or 200 on an
+// Idempotency-Key replay) body.
+type createUpdateResponse struct {
+	UpdateID  string    `json:"update_id"`
+	Pair      string    `json:"pair"`
+	Status    string    `json:"status"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func newCreateUpdateResponse(req domainquotes.CurrencyRateUpdateRequest) createUpdateResponse {
+	return createUpdateResponse{
+		UpdateID:  req.ID.String(),
+		Pair:      req.Pair.String(),
+		Status:    string(req.Status),
+		CreatedAt: req.CreatedAt,
+	}
+}
+
+// quoteRateDTO is the price/provenance fields shared by GET
+// /quotes/updates/{id} (once succeeded) and GET /quotes/latest. Price is a
+// fixed 10-decimal string, matching the NUMERIC(24,10) journal column, so a
+// JavaScript client can't lose precision by parsing it as a Number.
+type quoteRateDTO struct {
+	Price      string    `json:"price"`
+	QuotedAt   time.Time `json:"quoted_at"`
+	FetchedAt  time.Time `json:"fetched_at"`
+	Provider   string    `json:"provider"`
+	Quality    string    `json:"quality"`
+	Derived    bool      `json:"derived"`
+	Indicative bool      `json:"indicative"`
+}
+
+func newQuoteRateDTO(rate domainquotes.CurrencyRate) quoteRateDTO {
+	return quoteRateDTO{
+		Price:      rate.Value.StringFixed(10),
+		QuotedAt:   rate.QuotedAt,
+		FetchedAt:  rate.FetchedAt,
+		Provider:   rate.Provider,
+		Quality:    rate.Quality,
+		Derived:    rate.Derived,
+		Indicative: rate.Indicative,
+	}
+}
+
+// updateStatusResponse is GET /quotes/updates/{id}'s body. *quoteRateDTO and
+// Error are mutually exclusive with each other and depend on Status: nil
+// (and thus absent from the JSON — see encoding/json's handling of a nil
+// embedded pointer) unless the request succeeded or failed respectively.
+type updateStatusResponse struct {
+	UpdateID string `json:"update_id"`
+	Pair     string `json:"pair"`
+	Status   string `json:"status"`
+	*quoteRateDTO
+	Attempts int        `json:"attempts,omitempty"`
+	Error    *errorBody `json:"error,omitempty"`
+}
+
+func newUpdateStatusResponse(req domainquotes.CurrencyRateUpdateRequest, rate *domainquotes.CurrencyRate) updateStatusResponse {
+	resp := updateStatusResponse{
+		UpdateID: req.ID.String(),
+		Pair:     req.Pair.String(),
+		Status:   string(req.Status),
+	}
+	if rate != nil {
+		dto := newQuoteRateDTO(*rate)
+		resp.quoteRateDTO = &dto
+	}
+	if req.Status == domainquotes.StatusFailed {
+		resp.Attempts = req.Attempts
+		resp.Error = &errorBody{Code: req.ErrorCode, Message: req.ErrorMessage}
+	}
+	return resp
+}
+
+// latestQuoteResponse is GET /quotes/latest's body: the same rate fields as
+// a succeeded updateStatusResponse, minus update_id and status — there is
+// no single update request a direct latest-quote lookup resolves to
+// (docs/design.md §4).
+type latestQuoteResponse struct {
+	Pair string `json:"pair"`
+	quoteRateDTO
+}
+
+func newLatestQuoteResponse(pair string, rate domainquotes.CurrencyRate) latestQuoteResponse {
+	return latestQuoteResponse{Pair: pair, quoteRateDTO: newQuoteRateDTO(rate)}
+}

@@ -54,7 +54,9 @@ Dependencies point inwards: `api/http` → `quotes` (domain and use cases) → p
 ## File layout
 
 ```
-cmd/server/main.go                 — wiring: config, adapters, http.Server, graceful shutdown
+cmd/server/main.go                 — wiring: config, adapters, http.Server, dispatcher goroutine,
+                                      graceful shutdown
+cmd/server/provider.go             — factory: cfg.Provider -> RateProvider adapter
 
 internal/
   domain/
@@ -85,7 +87,10 @@ internal/
     memory/                        — second implementation of the same ports, for use-case tests
 
   api/http/
-    router.go, handlers.go, dto.go, middleware.go   — DTOs, kept separate from domain types
+    router.go, system_handlers.go, quotes_handlers.go, dto.go, middleware.go   — DTOs, kept
+                                      separate from domain types; system_handlers.go is
+                                      /healthz+/readyz, quotes_handlers.go the three business
+                                      endpoints
 
   config/config.go                 — env parsing
 
@@ -175,9 +180,10 @@ of calling the upstream. Neither replaces the other.
 ## Conventions
 
 - Comments and identifiers in English; the design doc and conversation in Russian.
-- Upstream failures are normalised inside the adapter into
-  `provider.Error{Code, Retryable, RetryAfter}`. The worker decides backoff vs permanent failure
-  from `Retryable` alone, so never return a bare `fmt.Errorf` from an adapter.
+- Upstream failures are normalised inside the adapter into `domainquotes.CurrencyRateError`
+  (`Code()`/`Retryable()`/`RetryAfter()`, `internal/domain/quotes/errors.go`). The worker decides
+  backoff vs permanent failure from `Retryable()` alone, so never return a bare `fmt.Errorf` from
+  an adapter.
 - Tests use fake clocks and controllable fakes; no `time.Sleep` in tests.
 - Integration tests live behind `//go:build integration` and skip without `TEST_DATABASE_URL`, so
   that `go test ./...` stays green on a machine with no database.

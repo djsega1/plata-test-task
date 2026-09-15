@@ -14,7 +14,7 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-func mustPair(t *testing.T, base, quote quotes.CurrencyCode) quotes.CurrencyPair {
+func testPair(t *testing.T, base, quote quotes.CurrencyCode) quotes.CurrencyPair {
 	t.Helper()
 	pair, err := quotes.NewCurrencyPair(base, quote)
 	if err != nil {
@@ -26,7 +26,7 @@ func mustPair(t *testing.T, base, quote quotes.CurrencyCode) quotes.CurrencyPair
 func TestFakeRateProvider_GetCurrencyRate(t *testing.T) {
 	fakeClock := clock.NewFakeClock(time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC))
 	provider := fake.NewFakeRateProvider(fakeClock, 0, 0, 0, 5*time.Minute)
-	pair := mustPair(t, quotes.CodeEUR, quotes.CodeMXN)
+	pair := testPair(t, quotes.CodeEUR, quotes.CodeMXN)
 
 	rate, err := provider.GetCurrencyRate(context.Background(), pair)
 	if err != nil {
@@ -78,11 +78,11 @@ func TestFakeRateProvider_DifferentPairsDifferentRates(t *testing.T) {
 	fakeClock := clock.NewFakeClock(time.Now())
 	provider := fake.NewFakeRateProvider(fakeClock, 0, 0, 0, 5*time.Minute)
 
-	eurMxn, err := provider.GetCurrencyRate(context.Background(), mustPair(t, quotes.CodeEUR, quotes.CodeMXN))
+	eurMxn, err := provider.GetCurrencyRate(context.Background(), testPair(t, quotes.CodeEUR, quotes.CodeMXN))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	usdEur, err := provider.GetCurrencyRate(context.Background(), mustPair(t, quotes.CodeUSD, quotes.CodeEUR))
+	usdEur, err := provider.GetCurrencyRate(context.Background(), testPair(t, quotes.CodeUSD, quotes.CodeEUR))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestFakeRateProvider_ContextCancelledDuringSimulatedDelay(t *testing.T) {
 	fakeClock := clock.NewFakeClock(time.Now())
 	// short delay; ctx is already cancelled, so this returns fast
 	provider := fake.NewFakeRateProvider(fakeClock, 50*time.Millisecond, 50*time.Millisecond, 0, 5*time.Minute)
-	pair := mustPair(t, quotes.CodeEUR, quotes.CodeMXN)
+	pair := testPair(t, quotes.CodeEUR, quotes.CodeMXN)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -116,7 +116,7 @@ func TestFakeRateProvider_ContextCancelledDuringSimulatedDelay(t *testing.T) {
 func TestFakeRateProvider_Quota(t *testing.T) {
 	fakeClock := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	provider := fake.NewFakeRateProvider(fakeClock, 0, 0, 2, 5*time.Minute) // 2 requests/minute
-	pair := mustPair(t, quotes.CodeEUR, quotes.CodeMXN)
+	pair := testPair(t, quotes.CodeEUR, quotes.CodeMXN)
 
 	for i := range 2 {
 		if _, err := provider.GetCurrencyRate(context.Background(), pair); err != nil {
@@ -148,7 +148,7 @@ func TestFakeRateProvider_QuotaUnderConcurrency(t *testing.T) {
 	const quota = 5
 	const callers = 20
 	provider := fake.NewFakeRateProvider(fakeClock, 0, 0, quota, 5*time.Minute)
-	pair := mustPair(t, quotes.CodeEUR, quotes.CodeMXN)
+	pair := testPair(t, quotes.CodeEUR, quotes.CodeMXN)
 
 	var wg sync.WaitGroup
 	var succeeded, limited int64

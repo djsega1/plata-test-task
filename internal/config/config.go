@@ -57,6 +57,24 @@ type Config struct {
 	// outbound calls to the configured provider (docs/design.md §2).
 	RateLimitPerMinute int
 	RateLimitPerHour   int
+
+	// DispatchTickInterval drives cmd/server's real ticker — the only
+	// mechanism that picks up backoff-deferred work and work created by
+	// another replica (docs/design.md §3). A POST's nudge covers the
+	// common case; the tick is the fallback.
+	DispatchTickInterval time.Duration
+	// DispatchBatchSize is ClaimBatch's limit per pass.
+	DispatchBatchSize int
+	// DispatchPoolSize bounds requests in flight at once across a batch —
+	// docs/design.md's circuit-breaker note assumes 8 workers cover 6 pairs.
+	DispatchPoolSize int
+	// DispatchVisibilityTimeout is how long a claimed row may stay
+	// in_progress before the reaper (folded into ClaimBatch) reclaims it.
+	// Must comfortably exceed a provider adapter's own HTTP timeout.
+	DispatchVisibilityTimeout time.Duration
+	// DispatchBaseBackoff is Worker's floor retry delay — raised to a
+	// failure's own Retry-After when that's longer, then jittered.
+	DispatchBaseBackoff time.Duration
 }
 
 const (
@@ -72,6 +90,12 @@ const (
 	defaultQuoteTTL           = 5 * time.Minute
 	defaultRateLimitPerMinute = 12
 	defaultRateLimitPerHour   = 100
+
+	defaultDispatchTickInterval      = 5 * time.Second
+	defaultDispatchBatchSize         = 100
+	defaultDispatchPoolSize          = 8
+	defaultDispatchVisibilityTimeout = 30 * time.Second
+	defaultDispatchBaseBackoff       = 5 * time.Second
 )
 
 // Load builds a Config from environment variables, then applies args as
@@ -90,6 +114,12 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		QuoteTTL:           defaultQuoteTTL,
 		RateLimitPerMinute: defaultRateLimitPerMinute,
 		RateLimitPerHour:   defaultRateLimitPerHour,
+
+		DispatchTickInterval:      defaultDispatchTickInterval,
+		DispatchBatchSize:         defaultDispatchBatchSize,
+		DispatchPoolSize:          defaultDispatchPoolSize,
+		DispatchVisibilityTimeout: defaultDispatchVisibilityTimeout,
+		DispatchBaseBackoff:       defaultDispatchBaseBackoff,
 	}
 
 	if v := getenv("HTTP_ADDR"); v != "" {
@@ -107,6 +137,9 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		{"HTTP_IDLE_TIMEOUT", &cfg.IdleTimeout},
 		{"HTTP_SHUTDOWN_TIMEOUT", &cfg.ShutdownTimeout},
 		{"QUOTE_TTL", &cfg.QuoteTTL},
+		{"DISPATCH_TICK_INTERVAL", &cfg.DispatchTickInterval},
+		{"DISPATCH_VISIBILITY_TIMEOUT", &cfg.DispatchVisibilityTimeout},
+		{"DISPATCH_BASE_BACKOFF", &cfg.DispatchBaseBackoff},
 	} {
 		if *d.dst, err = durationEnv(getenv, d.name, *d.dst); err != nil {
 			return Config{}, err
@@ -119,6 +152,8 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 	}{
 		{"RATE_LIMIT_PER_MINUTE", &cfg.RateLimitPerMinute},
 		{"RATE_LIMIT_PER_HOUR", &cfg.RateLimitPerHour},
+		{"DISPATCH_BATCH_SIZE", &cfg.DispatchBatchSize},
+		{"DISPATCH_POOL_SIZE", &cfg.DispatchPoolSize},
 	} {
 		if *n.dst, err = intEnv(getenv, n.name, *n.dst); err != nil {
 			return Config{}, err

@@ -46,7 +46,19 @@ func (d *Dispatcher) ClaimAndDispatch(ctx context.Context) error {
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(d.poolSize)
 	for _, req := range claimed {
-		g.Go(func() error {
+		g.Go(func() (_ error) {
+			// A panic anywhere in Process (worst case: a bug that slips
+			// past domain tests, e.g. NewCurrencyRateError's invalid-code
+			// guard) must not take down every other in-flight update and
+			// the dispatcher goroutine with it — errgroup does not recover
+			// panics on its own. Recovered exactly like a Worker.Process
+			// error: logged, row left in_progress for the reaper, rest of
+			// the batch keeps going.
+			defer func() {
+				if r := recover(); r != nil {
+					d.logger.Error("panic processing update", "id", req.ID, "pair", req.Pair.String(), "panic", r)
+				}
+			}()
 			if err := d.worker.Process(gctx, req); err != nil {
 				d.logger.Error("process update", "id", req.ID, "pair", req.Pair.String(), "error", err)
 			}
@@ -63,6 +75,15 @@ func (d *Dispatcher) ClaimAndDispatch(ctx context.Context) error {
 // not exercised on fake clocks the way ClaimAndDispatch is — nudge and tick
 // are passed in as plain channels precisely so a caller could still drive
 // this loop deterministically if it ever needed to.
+//
+// ctx only gates whether another pass is allowed to *start*: ClaimAndDispatch
+// itself runs on context.WithoutCancel(ctx), so a pass already in flight when
+// ctx is cancelled keeps running to completion instead of having its
+// in-progress upstream calls aborted out from under it (the caller, e.g.
+// cmd/server, relies on this — see its shutdown comment for why waiting on
+// this goroutine to exit is enough to let claimed rows finish). Each
+// upstream call still carries its own timeout, so this can't hang shutdown
+// forever.
 func (d *Dispatcher) Run(ctx context.Context, nudge <-chan struct{}, tick <-chan time.Time) {
 	for {
 		select {
@@ -71,7 +92,7 @@ func (d *Dispatcher) Run(ctx context.Context, nudge <-chan struct{}, tick <-chan
 		case <-nudge:
 		case <-tick:
 		}
-		if err := d.ClaimAndDispatch(ctx); err != nil {
+		if err := d.ClaimAndDispatch(context.WithoutCancel(ctx)); err != nil {
 			d.logger.Error("claim and dispatch", "error", err)
 		}
 	}

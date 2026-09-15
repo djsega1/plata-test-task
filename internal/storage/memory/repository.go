@@ -25,8 +25,6 @@ type record struct {
 	nextAttemptAt  time.Time
 	lockedAt       time.Time
 	quoteID        int64 // 0 means "no quote yet"
-	errCode        string
-	errMessage     string
 }
 
 type storedQuote struct {
@@ -121,19 +119,23 @@ func (r *Repository) ClaimBatch(_ context.Context, limit int, now, visibleSince 
 	// receiver, so this loop has no side effects to undo if it returns early.
 	claimed := make([]domainquotes.CurrencyRateUpdateRequest, len(candidates))
 	for i, rec := range candidates {
+		var next domainquotes.CurrencyRateUpdateRequest
 		if rec.req.Status == domainquotes.StatusPending {
-			next, err := rec.req.TransitionTo(domainquotes.StatusInProgress, now)
-			if err != nil {
+			var err error
+			if next, err = rec.req.TransitionTo(domainquotes.StatusInProgress, now); err != nil {
 				return nil, err
 			}
-			claimed[i] = next
 		} else {
 			// Already in_progress: the reaper reclaims it, not a fresh
 			// pending->in_progress transition, so just refresh bookkeeping.
-			next := rec.req
+			next = rec.req
 			next.UpdatedAt = now
-			claimed[i] = next
 		}
+		// storage/postgres's ClaimBatch increments attempts on every claim,
+		// reaper reclaims included, so this mirrors that regardless of
+		// which branch above ran.
+		next.Attempts++
+		claimed[i] = next
 	}
 
 	for i, rec := range candidates {
@@ -162,6 +164,11 @@ func (r *Repository) CompleteSuccess(
 	if err != nil {
 		return err
 	}
+	// Cleared here too: a request that failed once (retryable), requeued,
+	// and now succeeds must not keep reporting its earlier attempt's error
+	// once it's read back.
+	next.ErrorCode = ""
+	next.ErrorMessage = ""
 
 	rec.quoteID = r.findOrCreateQuote(pair, rate)
 	rec.req = next
@@ -200,12 +207,12 @@ func (r *Repository) CompleteFailure(
 	if err != nil {
 		return err
 	}
+	next.ErrorCode = errCode
+	next.ErrorMessage = errMessage
 	rec.req = next
 	if retryable {
 		rec.nextAttemptAt = nextAttemptAt
 	}
-	rec.errCode = errCode
-	rec.errMessage = errMessage
 	return nil
 }
 
