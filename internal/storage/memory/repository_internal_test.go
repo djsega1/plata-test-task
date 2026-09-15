@@ -24,7 +24,7 @@ func TestCompleteSuccess_DedupsSameQuotedAt(t *testing.T) {
 	pair, err := domainquotes.NewCurrencyPair(domainquotes.CodeEUR, domainquotes.CodeUSD)
 	require.NoError(t, err)
 	rate, err := domainquotes.NewCurrencyRate(
-		decimal.RequireFromString("18.4321"), false, "open", "live", "exchangerate.dev",
+		decimal.RequireFromString("18.4321"), false, "live", "exchangerate.dev",
 		true, now, now, now.Add(time.Minute),
 	)
 	require.NoError(t, err)

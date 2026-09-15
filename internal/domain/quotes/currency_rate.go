@@ -8,15 +8,14 @@ import (
 )
 
 type CurrencyRate struct {
-	Value         decimal.Decimal
-	Derived       bool
-	MarketSession string
-	Quality       string
-	QuotedAt      time.Time
-	Provider      string
-	Indicative    bool
-	FetchedAt     time.Time
-	StaleAfter    time.Time
+	Value      decimal.Decimal
+	Derived    bool
+	Quality    string
+	QuotedAt   time.Time
+	Provider   string
+	Indicative bool
+	FetchedAt  time.Time
+	StaleAfter time.Time
 }
 
 // NewCurrencyRate validates value > 0 before a rate is persisted to the
@@ -24,7 +23,7 @@ type CurrencyRate struct {
 func NewCurrencyRate(
 	value decimal.Decimal,
 	derived bool,
-	marketSession, quality, provider string,
+	quality, provider string,
 	indicative bool,
 	quotedAt, fetchedAt, staleAfter time.Time,
 ) (CurrencyRate, error) {
@@ -32,14 +31,13 @@ func NewCurrencyRate(
 		return CurrencyRate{}, fmt.Errorf("rate must be positive, got %s", value)
 	}
 	return CurrencyRate{
-		Value:         value,
-		Derived:       derived,
-		MarketSession: marketSession,
-		Quality:       quality,
-		Provider:      provider,
-		Indicative:    indicative,
-		QuotedAt:      quotedAt,
-		FetchedAt:     fetchedAt,
-		StaleAfter:    staleAfter,
+		Value:      value,
+		Derived:    derived,
+		Quality:    quality,
+		Provider:   provider,
+		Indicative: indicative,
+		QuotedAt:   quotedAt,
+		FetchedAt:  fetchedAt,
+		StaleAfter: staleAfter,
 	}, nil
 }

@@ -176,10 +176,6 @@ func (r *Repository) findOrCreateQuote(pair domainquotes.CurrencyPair, rate doma
 			return id
 		}
 	}
-	// The quotes table has no market_session column — storage/postgres
-	// never persists it, so it must not survive a round-trip here either.
-	rate.MarketSession = ""
-
 	r.nextQuoteID++
 	r.quotes[r.nextQuoteID] = storedQuote{pair: pair, rate: rate}
 	return r.nextQuoteID

@@ -23,15 +23,33 @@ type ExchangerateDevProvider struct {
 	baseURL    string
 	apiKey     string
 	httpClient *http.Client
+	quoteTTL   time.Duration
 }
 
 // NewExchangerateDevProvider builds an adapter. apiKey may be empty. A nil httpClient gets a
-// 5s timeout.
-func NewExchangerateDevProvider(baseURL, apiKey string, httpClient *http.Client) *ExchangerateDevProvider {
+// 5s timeout. quoteTTL is the StaleAfter window for any quality other than "live"/"daily".
+func NewExchangerateDevProvider(baseURL, apiKey string, httpClient *http.Client, quoteTTL time.Duration) *ExchangerateDevProvider {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 5 * time.Second}
 	}
-	return &ExchangerateDevProvider{baseURL: baseURL, apiKey: apiKey, httpClient: httpClient}
+	return &ExchangerateDevProvider{baseURL: baseURL, apiKey: apiKey, httpClient: httpClient, quoteTTL: quoteTTL}
+}
+
+func (e *ExchangerateDevProvider) Provider() string { return "exchangerate.dev" }
+
+func (e *ExchangerateDevProvider) Indicative() bool { return true }
+
+// StaleAfter: ~60s for a live quote, next publication (~24h) for a daily fixing, quoteTTL
+// for anything mapQuality didn't recognize.
+func (e *ExchangerateDevProvider) StaleAfter(quality string, quotedAt time.Time) time.Time {
+	switch quality {
+	case "live":
+		return quotedAt.Add(60 * time.Second)
+	case "daily":
+		return quotedAt.Add(24 * time.Hour)
+	default:
+		return quotedAt.Add(e.quoteTTL)
+	}
 }
 
 // rateResponse holds only the fields this service uses.
@@ -39,7 +57,6 @@ type rateResponse struct {
 	Result        string      `json:"result"`
 	Rate          json.Number `json:"rate"`
 	Source        string      `json:"source"`
-	MarketSession string      `json:"market_session"`
 	DataUpdatedAt time.Time   `json:"data_updated_at"`
 	Derived       bool        `json:"derived"`
 }
@@ -50,12 +67,12 @@ type errorResponse struct {
 	Message string `json:"message"`
 }
 
-func (e *ExchangerateDevProvider) GetCurrencyRate(ctx context.Context, pair domainquotes.CurrencyPair) (domainquotes.CurrencyRate, error) {
+func (e *ExchangerateDevProvider) GetCurrencyRate(ctx context.Context, pair domainquotes.CurrencyPair) (quotes.ProviderQuote, error) {
 	url := e.baseURL + "/v1/rate/" + pair.Slug("-")
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return domainquotes.CurrencyRate{}, fmt.Errorf("exchangeratedev: build request: %w", err)
+		return quotes.ProviderQuote{}, fmt.Errorf("exchangeratedev: build request: %w", err)
 	}
 	if e.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+e.apiKey)
@@ -64,46 +81,45 @@ func (e *ExchangerateDevProvider) GetCurrencyRate(ctx context.Context, pair doma
 	resp, err := e.httpClient.Do(req)
 	if err != nil {
 		// not a provider error: this is the caller's context, return it as is.
-		return domainquotes.CurrencyRate{}, err
+		return quotes.ProviderQuote{}, err
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return domainquotes.CurrencyRate{}, domainquotes.NewCurrencyRateError(
+		return quotes.ProviderQuote{}, domainquotes.NewCurrencyRateError(
 			domainquotes.MalformedResponseError, "reading response body: "+err.Error(), false, 0, "",
 		)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return domainquotes.CurrencyRate{}, e.errorFromBody(resp.StatusCode, resp.Header, body)
+		return quotes.ProviderQuote{}, e.errorFromBody(resp.StatusCode, resp.Header, body)
 	}
 
 	var success rateResponse
 	if err := json.Unmarshal(body, &success); err != nil {
-		return domainquotes.CurrencyRate{}, domainquotes.NewCurrencyRateError(
+		return quotes.ProviderQuote{}, domainquotes.NewCurrencyRateError(
 			domainquotes.MalformedResponseError, "decoding response: "+err.Error(), false, 0, "",
 		)
 	}
 
 	if success.Result != "success" {
 		// status 200 but not a success body
-		return domainquotes.CurrencyRate{}, e.errorFromBody(resp.StatusCode, resp.Header, body)
+		return quotes.ProviderQuote{}, e.errorFromBody(resp.StatusCode, resp.Header, body)
 	}
 
 	rateValue, err := decimal.NewFromString(success.Rate.String())
 	if err != nil {
-		return domainquotes.CurrencyRate{}, domainquotes.NewCurrencyRateError(
+		return quotes.ProviderQuote{}, domainquotes.NewCurrencyRateError(
 			domainquotes.MalformedResponseError, "parsing rate: "+err.Error(), false, 0, "",
 		)
 	}
 
-	return domainquotes.CurrencyRate{
-		Value:         rateValue,
-		Derived:       success.Derived,
-		MarketSession: success.MarketSession,
-		Quality:       mapQuality(success.Source),
-		QuotedAt:      success.DataUpdatedAt,
+	return quotes.ProviderQuote{
+		Value:    rateValue,
+		Derived:  success.Derived,
+		Quality:  mapQuality(success.Source),
+		QuotedAt: success.DataUpdatedAt,
 	}, nil
 }
 

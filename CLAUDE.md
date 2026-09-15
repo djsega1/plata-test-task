@@ -68,7 +68,8 @@ internal/
   usecase/
     quotes/                        — calls the domain and the ports below; the ports' consumer
       repository.go                — port: Repository (declared here, not in domain)
-      provider.go                  — port: RateProvider (GetCurrencyRate(ctx, pair) (quotes.CurrencyRate, error))
+      provider.go                  — port: RateProvider (GetCurrencyRate, plus Provider/Indicative/StaleAfter —
+                                      identity and freshness cadence are upstream-specific, so each adapter owns them)
       clock.go                     — port: Clock (fake clocks in tests)
       request_update.go            — use case
       get_by_update_id.go          — use case
@@ -110,8 +111,12 @@ splitting domain from use cases explicitly. Anywhere both are imported together,
 one already qualified by its role).
 
 **One pair per upstream call.** The provider port is
-`RateProvider.GetCurrencyRate(ctx, pair) (CurrencyRate, error)` against
-`exchangerate.dev /v1/rate/{base}-{quote}`. The provider also offers `/v1/latest`, which returns
+`RateProvider.GetCurrencyRate(ctx, pair) (ProviderQuote, error)` against
+`exchangerate.dev /v1/rate/{base}-{quote}`. `ProviderQuote` is deliberately not the domain
+`CurrencyRate` — it carries only what an adapter itself knows (`Value`, `Derived`, `Quality`,
+`QuotedAt`), skipping `NewCurrencyRate`'s invariant check on purpose, since a raw upstream value
+isn't safe to persist yet; the worker builds the real `CurrencyRate` once it has this plus
+`Provider`/`Indicative`/`StaleAfter`. The provider also offers `/v1/latest`, which returns
 every currency in one call — deliberately not used: it would collapse six pairs into one request and
 leave the background machinery (worker pool, per-pair single-flight, rate limiting) doing nothing,
 and background processing is the point of this assignment. See §2 of the design doc.
@@ -139,15 +144,24 @@ claim eight tasks for the same pair, all see a stale quote and all call the upst
 *different* pairs must still go out in parallel — that is what the pool is for. Every update keeps
 its own status and its own `quote_id` regardless.
 
+The single-flight key wraps the whole reuse-or-fetch decision, not just the upstream call: a
+`GetLatestQuote` read followed by a fetch, both inside one `singleflight.Do`. Wrapping only the
+fetch leaves a window — a caller that reads a stale quote just before another caller's fetch lands
+would join no in-flight call and fetch again on its own, right after a fetch that already covered
+it. Re-reading freshness inside the same critical section closes that window: whichever caller
+becomes the new leader sees the other one's write first.
+
 **Two clocks, never one.** `quoted_at` is the upstream's `data_updated_at` — when the price became
 current; `fetched_at` is when it was read. The assignment's "время обновления" is the first one, and
 "latest" is ordered by `quoted_at DESC, id DESC`: the upstream can return a price older than one
 already stored, and ordering by `fetched_at` would then return the staler row.
 
 **`stale_after` is a cache policy, not a provider guarantee.** The upstream reports `source`
-(`live`, `ecb_daily`, `fred_daily`) but promises no lifetime. The service derives a freshness
-window: ~60s for `live`, next publication for daily sources, a conservative `QUOTE_TTL` for anything
-unknown. Do not key it off `market_session` — live currencies tick on weekends too.
+(`live`, `ecb_daily`, `fred_daily`) but promises no lifetime, and a different upstream could use an
+entirely different quality vocabulary — so each adapter's `StaleAfter(quality, quotedAt)` derives its
+own freshness window, not a shared function keyed on a fixed set of strings. `exchangerate.dev`'s:
+~60s for `live`, next publication (~24h) for daily sources, a conservative `QUOTE_TTL` from config for
+anything else.
 
 **Money is `decimal`, never `float64`.** Rates are decoded from JSON as `json.Number` and parsed
 into `shopspring/decimal`; the journal stores `NUMERIC(24,10)`; the API serialises prices as strings

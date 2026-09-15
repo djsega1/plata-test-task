@@ -13,7 +13,7 @@ func TestNewCurrencyRate(t *testing.T) {
 
 	t.Run("valid", func(t *testing.T) {
 		rate, err := quotes.NewCurrencyRate(
-			decimal.RequireFromString("18.4321"), false, "open", "live", "exchangerate.dev",
+			decimal.RequireFromString("18.4321"), false, "live", "exchangerate.dev",
 			true, now, now, now.Add(time.Minute),
 		)
 		if err != nil {
@@ -29,7 +29,7 @@ func TestNewCurrencyRate(t *testing.T) {
 
 	t.Run("zero rate", func(t *testing.T) {
 		if _, err := quotes.NewCurrencyRate(
-			decimal.Zero, false, "open", "live", "exchangerate.dev", true, now, now, now,
+			decimal.Zero, false, "live", "exchangerate.dev", true, now, now, now,
 		); err == nil {
 			t.Error("want error for zero rate")
 		}
@@ -37,7 +37,7 @@ func TestNewCurrencyRate(t *testing.T) {
 
 	t.Run("negative rate", func(t *testing.T) {
 		if _, err := quotes.NewCurrencyRate(
-			decimal.RequireFromString("-1"), false, "open", "live", "exchangerate.dev", true, now, now, now,
+			decimal.RequireFromString("-1"), false, "live", "exchangerate.dev", true, now, now, now,
 		); err == nil {
 			t.Error("want error for negative rate")
 		}

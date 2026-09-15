@@ -40,7 +40,7 @@ func TestGetLatest_ReturnsSucceededQuote(t *testing.T) {
 	require.NoError(t, err)
 
 	rate, err := domainquotes.NewCurrencyRate(
-		decimal.RequireFromString("1.0824"), false, "open", "live", "exchangerate.dev",
+		decimal.RequireFromString("1.0824"), false, "live", "exchangerate.dev",
 		true, testNow, testNow, testNow.Add(time.Minute),
 	)
 	require.NoError(t, err)

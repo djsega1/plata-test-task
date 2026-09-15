@@ -25,7 +25,7 @@ func mustPair(t *testing.T, base, quote quotes.CurrencyCode) quotes.CurrencyPair
 
 func TestFakeRateProvider_GetCurrencyRate(t *testing.T) {
 	fakeClock := clock.NewFakeClock(time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC))
-	provider := fake.NewFakeRateProvider(fakeClock, 0, 0, 0)
+	provider := fake.NewFakeRateProvider(fakeClock, 0, 0, 0, 5*time.Minute)
 	pair := mustPair(t, quotes.CodeEUR, quotes.CodeMXN)
 
 	rate, err := provider.GetCurrencyRate(context.Background(), pair)
@@ -39,9 +39,6 @@ func TestFakeRateProvider_GetCurrencyRate(t *testing.T) {
 	if rate.Quality != "live" {
 		t.Errorf("Quality = %q, want %q", rate.Quality, "live")
 	}
-	if rate.MarketSession != "open" {
-		t.Errorf("MarketSession = %q, want %q", rate.MarketSession, "open")
-	}
 	if rate.Derived {
 		t.Error("Derived = true, want false")
 	}
@@ -54,9 +51,32 @@ func TestFakeRateProvider_GetCurrencyRate(t *testing.T) {
 	}
 }
 
+func TestFakeRateProvider_ProviderAndIndicative(t *testing.T) {
+	provider := fake.NewFakeRateProvider(clock.NewFakeClock(time.Now()), 0, 0, 0, 5*time.Minute)
+
+	if got := provider.Provider(); got != "fake" {
+		t.Errorf("Provider() = %q, want %q", got, "fake")
+	}
+	if !provider.Indicative() {
+		t.Error("Indicative() = false, want true")
+	}
+}
+
+func TestFakeRateProvider_StaleAfter(t *testing.T) {
+	provider := fake.NewFakeRateProvider(clock.NewFakeClock(time.Now()), 0, 0, 0, 5*time.Minute)
+	quotedAt := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	if got, want := provider.StaleAfter("live", quotedAt), quotedAt.Add(60*time.Second); !got.Equal(want) {
+		t.Errorf(`StaleAfter("live", ...) = %v, want %v`, got, want)
+	}
+	if got, want := provider.StaleAfter("unknown", quotedAt), quotedAt.Add(5*time.Minute); !got.Equal(want) {
+		t.Errorf(`StaleAfter("unknown", ...) = %v, want %v (quoteTTL)`, got, want)
+	}
+}
+
 func TestFakeRateProvider_DifferentPairsDifferentRates(t *testing.T) {
 	fakeClock := clock.NewFakeClock(time.Now())
-	provider := fake.NewFakeRateProvider(fakeClock, 0, 0, 0)
+	provider := fake.NewFakeRateProvider(fakeClock, 0, 0, 0, 5*time.Minute)
 
 	eurMxn, err := provider.GetCurrencyRate(context.Background(), mustPair(t, quotes.CodeEUR, quotes.CodeMXN))
 	if err != nil {
@@ -75,7 +95,7 @@ func TestFakeRateProvider_DifferentPairsDifferentRates(t *testing.T) {
 func TestFakeRateProvider_ContextCancelledDuringSimulatedDelay(t *testing.T) {
 	fakeClock := clock.NewFakeClock(time.Now())
 	// short delay; ctx is already cancelled, so this returns fast
-	provider := fake.NewFakeRateProvider(fakeClock, 50*time.Millisecond, 50*time.Millisecond, 0)
+	provider := fake.NewFakeRateProvider(fakeClock, 50*time.Millisecond, 50*time.Millisecond, 0, 5*time.Minute)
 	pair := mustPair(t, quotes.CodeEUR, quotes.CodeMXN)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -95,7 +115,7 @@ func TestFakeRateProvider_ContextCancelledDuringSimulatedDelay(t *testing.T) {
 
 func TestFakeRateProvider_Quota(t *testing.T) {
 	fakeClock := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-	provider := fake.NewFakeRateProvider(fakeClock, 0, 0, 2) // 2 requests/minute
+	provider := fake.NewFakeRateProvider(fakeClock, 0, 0, 2, 5*time.Minute) // 2 requests/minute
 	pair := mustPair(t, quotes.CodeEUR, quotes.CodeMXN)
 
 	for i := range 2 {
@@ -127,7 +147,7 @@ func TestFakeRateProvider_QuotaUnderConcurrency(t *testing.T) {
 	fakeClock := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	const quota = 5
 	const callers = 20
-	provider := fake.NewFakeRateProvider(fakeClock, 0, 0, quota)
+	provider := fake.NewFakeRateProvider(fakeClock, 0, 0, quota, 5*time.Minute)
 	pair := mustPair(t, quotes.CodeEUR, quotes.CodeMXN)
 
 	var wg sync.WaitGroup

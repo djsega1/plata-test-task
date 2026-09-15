@@ -31,34 +31,50 @@ type FakeRateProvider struct {
 	minDelay time.Duration
 	maxDelay time.Duration
 	rpmQuota int // requests per minute; 0 means no limit
+	quoteTTL time.Duration
 
 	mu        sync.Mutex
 	callTimes []time.Time
 }
 
 // NewFakeRateProvider builds a fake provider. minDelay == maxDelay == 0 disables the
-// simulated delay; rpmQuota <= 0 disables the rate limit.
-func NewFakeRateProvider(clock quotes.Clock, minDelay, maxDelay time.Duration, rpmQuota int) *FakeRateProvider {
+// simulated delay; rpmQuota <= 0 disables the rate limit. quoteTTL is the StaleAfter
+// window for any quality other than "live".
+func NewFakeRateProvider(clock quotes.Clock, minDelay, maxDelay time.Duration, rpmQuota int, quoteTTL time.Duration) *FakeRateProvider {
 	return &FakeRateProvider{
 		clock:    clock,
 		minDelay: minDelay,
 		maxDelay: maxDelay,
 		rpmQuota: rpmQuota,
+		quoteTTL: quoteTTL,
 	}
 }
 
-func (f *FakeRateProvider) GetCurrencyRate(ctx context.Context, pair domainquotes.CurrencyPair) (domainquotes.CurrencyRate, error) {
+func (f *FakeRateProvider) Provider() string { return "fake" }
+
+func (f *FakeRateProvider) Indicative() bool { return true }
+
+// StaleAfter treats "live" the same way exchangeratedev does (~60s); anything else
+// falls back to quoteTTL.
+func (f *FakeRateProvider) StaleAfter(quality string, quotedAt time.Time) time.Time {
+	if quality == "live" {
+		return quotedAt.Add(60 * time.Second)
+	}
+	return quotedAt.Add(f.quoteTTL)
+}
+
+func (f *FakeRateProvider) GetCurrencyRate(ctx context.Context, pair domainquotes.CurrencyPair) (quotes.ProviderQuote, error) {
 	if err := f.checkQuota(); err != nil {
-		return domainquotes.CurrencyRate{}, err
+		return quotes.ProviderQuote{}, err
 	}
 
 	if err := f.simulateDelay(ctx); err != nil {
-		return domainquotes.CurrencyRate{}, err
+		return quotes.ProviderQuote{}, err
 	}
 
 	base, ok := baseRates[pair.Slug("-")]
 	if !ok {
-		return domainquotes.CurrencyRate{}, domainquotes.NewCurrencyRateError(
+		return quotes.ProviderQuote{}, domainquotes.NewCurrencyRateError(
 			domainquotes.UnsupportedPairError,
 			fmt.Sprintf("fake provider has no rate for %s", pair),
 			false,
@@ -69,12 +85,11 @@ func (f *FakeRateProvider) GetCurrencyRate(ctx context.Context, pair domainquote
 
 	jitter := decimal.NewFromFloat(1 + (rand.Float64()-0.5)*0.01) // +-0.5%
 
-	return domainquotes.CurrencyRate{
-		Value:         base.Mul(jitter),
-		Derived:       false,
-		MarketSession: "open",
-		Quality:       "live",
-		QuotedAt:      f.clock.Now(),
+	return quotes.ProviderQuote{
+		Value:    base.Mul(jitter),
+		Derived:  false,
+		Quality:  "live",
+		QuotedAt: f.clock.Now(),
 	}, nil
 }
 

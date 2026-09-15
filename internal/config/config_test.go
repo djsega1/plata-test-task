@@ -35,16 +35,19 @@ func TestLoadDefaults(t *testing.T) {
 	require.NoError(t, err)
 
 	want := Config{
-		HTTPAddr:          defaultHTTPAddr,
-		ReadTimeout:       defaultReadTimeout,
-		ReadHeaderTimeout: defaultReadHeaderTimeout,
-		WriteTimeout:      defaultWriteTimeout,
-		IdleTimeout:       defaultIdleTimeout,
-		ShutdownTimeout:   defaultShutdownTimeout,
-		LogLevel:          defaultLogLevel,
-		Provider:          defaultProvider,
-		Storage:           defaultStorage,
-		DatabaseURL:       "postgres://localhost/quotes",
+		HTTPAddr:           defaultHTTPAddr,
+		ReadTimeout:        defaultReadTimeout,
+		ReadHeaderTimeout:  defaultReadHeaderTimeout,
+		WriteTimeout:       defaultWriteTimeout,
+		IdleTimeout:        defaultIdleTimeout,
+		ShutdownTimeout:    defaultShutdownTimeout,
+		LogLevel:           defaultLogLevel,
+		Provider:           defaultProvider,
+		Storage:            defaultStorage,
+		DatabaseURL:        "postgres://localhost/quotes",
+		QuoteTTL:           defaultQuoteTTL,
+		RateLimitPerMinute: defaultRateLimitPerMinute,
+		RateLimitPerHour:   defaultRateLimitPerHour,
 	}
 	assert.Equal(t, want, cfg)
 }
@@ -71,6 +74,41 @@ func TestLoadDurationOverrides(t *testing.T) {
 	assert.Equal(t, 3*time.Second, cfg.WriteTimeout)
 	assert.Equal(t, 4*time.Second, cfg.IdleTimeout)
 	assert.Equal(t, 5*time.Second, cfg.ShutdownTimeout)
+}
+
+func TestLoadQuoteTTLOverride(t *testing.T) {
+	cfg, err := Load(nil, fakeGetenv(withEnv(map[string]string{"QUOTE_TTL": "10m"})))
+	require.NoError(t, err)
+	assert.Equal(t, 10*time.Minute, cfg.QuoteTTL)
+}
+
+func TestLoadRateLimitOverrides(t *testing.T) {
+	env := withEnv(map[string]string{
+		"RATE_LIMIT_PER_MINUTE": "5",
+		"RATE_LIMIT_PER_HOUR":   "50",
+	})
+	cfg, err := Load(nil, fakeGetenv(env))
+	require.NoError(t, err)
+
+	assert.Equal(t, 5, cfg.RateLimitPerMinute)
+	assert.Equal(t, 50, cfg.RateLimitPerHour)
+}
+
+func TestLoadRateLimitInvalid(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+	}{
+		{"not a number", map[string]string{"RATE_LIMIT_PER_MINUTE": "many"}},
+		{"zero", map[string]string{"RATE_LIMIT_PER_HOUR": "0"}},
+		{"negative", map[string]string{"RATE_LIMIT_PER_MINUTE": "-1"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(nil, fakeGetenv(withEnv(tt.env)))
+			require.Error(t, err)
+		})
+	}
 }
 
 func TestLoadDurationInvalid(t *testing.T) {

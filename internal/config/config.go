@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -48,33 +49,47 @@ type Config struct {
 	Provider          Provider
 	Storage           Storage
 	DatabaseURL       string
+
+	// QuoteTTL is the StaleAfter fallback an adapter uses for any quality
+	// it doesn't otherwise recognize.
+	QuoteTTL time.Duration
+	// RateLimitPerMinute/RateLimitPerHour bound the dispatcher's own
+	// outbound calls to the configured provider (docs/design.md §2).
+	RateLimitPerMinute int
+	RateLimitPerHour   int
 }
 
 const (
-	defaultHTTPAddr          = ":8080"
-	defaultReadTimeout       = 5 * time.Second
-	defaultReadHeaderTimeout = 5 * time.Second
-	defaultWriteTimeout      = 10 * time.Second
-	defaultIdleTimeout       = 60 * time.Second
-	defaultShutdownTimeout   = 10 * time.Second
-	defaultLogLevel          = slog.LevelInfo
-	defaultProvider          = ProviderFake
-	defaultStorage           = StoragePostgres
+	defaultHTTPAddr           = ":8080"
+	defaultReadTimeout        = 5 * time.Second
+	defaultReadHeaderTimeout  = 5 * time.Second
+	defaultWriteTimeout       = 10 * time.Second
+	defaultIdleTimeout        = 60 * time.Second
+	defaultShutdownTimeout    = 10 * time.Second
+	defaultLogLevel           = slog.LevelInfo
+	defaultProvider           = ProviderFake
+	defaultStorage            = StoragePostgres
+	defaultQuoteTTL           = 5 * time.Minute
+	defaultRateLimitPerMinute = 12
+	defaultRateLimitPerHour   = 100
 )
 
 // Load builds a Config from environment variables, then applies args as
 // --provider flag overrides. Pass os.Getenv and os.Args[1:] in production.
 func Load(args []string, getenv func(string) string) (Config, error) {
 	cfg := Config{
-		HTTPAddr:          defaultHTTPAddr,
-		ReadTimeout:       defaultReadTimeout,
-		ReadHeaderTimeout: defaultReadHeaderTimeout,
-		WriteTimeout:      defaultWriteTimeout,
-		IdleTimeout:       defaultIdleTimeout,
-		ShutdownTimeout:   defaultShutdownTimeout,
-		LogLevel:          defaultLogLevel,
-		Provider:          defaultProvider,
-		Storage:           defaultStorage,
+		HTTPAddr:           defaultHTTPAddr,
+		ReadTimeout:        defaultReadTimeout,
+		ReadHeaderTimeout:  defaultReadHeaderTimeout,
+		WriteTimeout:       defaultWriteTimeout,
+		IdleTimeout:        defaultIdleTimeout,
+		ShutdownTimeout:    defaultShutdownTimeout,
+		LogLevel:           defaultLogLevel,
+		Provider:           defaultProvider,
+		Storage:            defaultStorage,
+		QuoteTTL:           defaultQuoteTTL,
+		RateLimitPerMinute: defaultRateLimitPerMinute,
+		RateLimitPerHour:   defaultRateLimitPerHour,
 	}
 
 	if v := getenv("HTTP_ADDR"); v != "" {
@@ -91,8 +106,21 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		{"HTTP_WRITE_TIMEOUT", &cfg.WriteTimeout},
 		{"HTTP_IDLE_TIMEOUT", &cfg.IdleTimeout},
 		{"HTTP_SHUTDOWN_TIMEOUT", &cfg.ShutdownTimeout},
+		{"QUOTE_TTL", &cfg.QuoteTTL},
 	} {
 		if *d.dst, err = durationEnv(getenv, d.name, *d.dst); err != nil {
+			return Config{}, err
+		}
+	}
+
+	for _, n := range []struct {
+		name string
+		dst  *int
+	}{
+		{"RATE_LIMIT_PER_MINUTE", &cfg.RateLimitPerMinute},
+		{"RATE_LIMIT_PER_HOUR", &cfg.RateLimitPerHour},
+	} {
+		if *n.dst, err = intEnv(getenv, n.name, *n.dst); err != nil {
 			return Config{}, err
 		}
 	}
@@ -149,6 +177,22 @@ func durationEnv(getenv func(string) string, name string, def time.Duration) (ti
 		return 0, fmt.Errorf("config: %s must be positive, got %q", name, v)
 	}
 	return d, nil
+}
+
+// intEnv parses name as a positive int, or returns def if unset.
+func intEnv(getenv func(string) string, name string, def int) (int, error) {
+	v := getenv(name)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("config: invalid %s %q: %w", name, v, err)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("config: %s must be positive, got %q", name, v)
+	}
+	return n, nil
 }
 
 // parseLogLevel maps a level name (debug/info/warn/error) to slog.Level.

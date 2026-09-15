@@ -28,7 +28,7 @@ func testPair(t *testing.T) domainquotes.CurrencyPair {
 func testRate(t *testing.T, quotedAt time.Time) domainquotes.CurrencyRate {
 	t.Helper()
 	rate, err := domainquotes.NewCurrencyRate(
-		decimal.RequireFromString("18.4321"), false, "open", "live", "exchangerate.dev",
+		decimal.RequireFromString("18.4321"), false, "live", "exchangerate.dev",
 		true, quotedAt, quotedAt, quotedAt.Add(time.Minute),
 	)
 	require.NoError(t, err)
@@ -191,7 +191,6 @@ func TestCompleteSuccess(t *testing.T) {
 	assert.True(t, rate.QuotedAt.Equal(gotRate.QuotedAt))
 	assert.True(t, rate.FetchedAt.Equal(gotRate.FetchedAt))
 	assert.True(t, rate.StaleAfter.Equal(gotRate.StaleAfter))
-	assert.Empty(t, gotRate.MarketSession, "quotes has no market_session column; storage/postgres never returns it, memory must match")
 
 	latest, err := repo.GetLatestQuote(ctx, pair)
 	require.NoError(t, err)

@@ -1,0 +1,218 @@
+package quotes_test
+
+import (
+	"context"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/shopspring/decimal"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	domainquotes "github.com/djsega1/plata-test-task/internal/domain/quotes"
+	"github.com/djsega1/plata-test-task/internal/storage/memory"
+	"github.com/djsega1/plata-test-task/internal/usecase/quotes"
+	"github.com/djsega1/plata-test-task/pkg/clock"
+)
+
+// countingProvider is a hand-written RateProvider test double. It counts
+// calls and can optionally block each call on a gate and/or announce each
+// call on arrived, for concurrency tests.
+type countingProvider struct {
+	mu    sync.Mutex
+	calls int
+
+	rate quotes.ProviderQuote
+	err  error
+
+	gate    chan struct{} // nil: don't block
+	arrived chan struct{} // nil: don't announce
+}
+
+func (p *countingProvider) GetCurrencyRate(_ context.Context, _ domainquotes.CurrencyPair) (quotes.ProviderQuote, error) {
+	p.mu.Lock()
+	p.calls++
+	p.mu.Unlock()
+
+	if p.arrived != nil {
+		p.arrived <- struct{}{}
+	}
+	if p.gate != nil {
+		<-p.gate
+	}
+	if p.err != nil {
+		return quotes.ProviderQuote{}, p.err
+	}
+	return p.rate, nil
+}
+
+func (p *countingProvider) Provider() string { return "test-provider" }
+func (p *countingProvider) Indicative() bool { return true }
+func (p *countingProvider) StaleAfter(_ string, quotedAt time.Time) time.Time {
+	return quotedAt.Add(time.Minute)
+}
+
+func (p *countingProvider) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+func testUpdatePair(t *testing.T) domainquotes.CurrencyPair {
+	t.Helper()
+	pair, err := domainquotes.NewCurrencyPair(domainquotes.CodeEUR, domainquotes.CodeUSD)
+	require.NoError(t, err)
+	return pair
+}
+
+// claimOne creates one pending request and claims it, returning the
+// now-in_progress row Worker.Process expects.
+func claimOne(t *testing.T, repo *memory.Repository, pair domainquotes.CurrencyPair, now time.Time) domainquotes.CurrencyRateUpdateRequest {
+	t.Helper()
+	req := domainquotes.NewCurrencyRateUpdateRequest(pair, now)
+	require.NoError(t, repo.CreateUpdateRequest(t.Context(), req, ""))
+	claimed, err := repo.ClaimBatch(t.Context(), 1, now, now.Add(-time.Hour))
+	require.NoError(t, err)
+	require.Len(t, claimed, 1)
+	return claimed[0]
+}
+
+func TestWorker_Process_PendingToSucceeded(t *testing.T) {
+	repo := memory.NewRepository()
+	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	pair := testUpdatePair(t)
+
+	provider := &countingProvider{rate: quotes.ProviderQuote{
+		Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now(),
+	}}
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), time.Second)
+
+	req := claimOne(t, repo, pair, fc.Now())
+	require.NoError(t, worker.Process(t.Context(), req))
+
+	gotReq, gotRate, err := repo.GetUpdateByID(t.Context(), req.ID)
+	require.NoError(t, err)
+	assert.Equal(t, domainquotes.StatusSucceeded, gotReq.Status)
+	require.NotNil(t, gotRate)
+	assert.Equal(t, "test-provider", gotRate.Provider)
+	assert.True(t, gotRate.Indicative)
+	assert.Equal(t, 1, provider.callCount())
+}
+
+func TestWorker_Process_ReusesFreshQuoteWithoutCallingProvider(t *testing.T) {
+	repo := memory.NewRepository()
+	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	pair := testUpdatePair(t)
+
+	provider := &countingProvider{rate: quotes.ProviderQuote{
+		Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now(),
+	}}
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), time.Second)
+
+	first := claimOne(t, repo, pair, fc.Now())
+	require.NoError(t, worker.Process(t.Context(), first))
+	require.Equal(t, 1, provider.callCount())
+
+	fc.Advance(time.Second) // still inside the 1-minute StaleAfter window
+	second := claimOne(t, repo, pair, fc.Now())
+	require.NoError(t, worker.Process(t.Context(), second))
+
+	assert.Equal(t, 1, provider.callCount(), "second request must reuse the still-fresh quote")
+
+	_, secondRate, err := repo.GetUpdateByID(t.Context(), second.ID)
+	require.NoError(t, err)
+	require.NotNil(t, secondRate)
+	_, firstRate, err := repo.GetUpdateByID(t.Context(), first.ID)
+	require.NoError(t, err)
+	assert.True(t, firstRate.QuotedAt.Equal(secondRate.QuotedAt), "both point at the same journal row")
+}
+
+func TestWorker_Process_RetryableFailureDefersWithBackoff(t *testing.T) {
+	repo := memory.NewRepository()
+	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	pair := testUpdatePair(t)
+
+	provider := &countingProvider{err: domainquotes.NewCurrencyRateError(
+		domainquotes.ProviderUnavailableError, "upstream down", true, 30*time.Second, "",
+	)}
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), 10*time.Second)
+
+	req := claimOne(t, repo, pair, fc.Now())
+	require.NoError(t, worker.Process(t.Context(), req))
+
+	gotReq, gotRate, err := repo.GetUpdateByID(t.Context(), req.ID)
+	require.NoError(t, err)
+	assert.Equal(t, domainquotes.StatusPending, gotReq.Status)
+	assert.Nil(t, gotRate)
+
+	// Not claimable yet: even the error's own 30s RetryAfter hasn't passed.
+	notYet, err := repo.ClaimBatch(t.Context(), 10, fc.Now().Add(20*time.Second), fc.Now().Add(-time.Hour))
+	require.NoError(t, err)
+	assert.Empty(t, notYet)
+
+	dueLater, err := repo.ClaimBatch(t.Context(), 10, fc.Now().Add(time.Minute), fc.Now().Add(-time.Hour))
+	require.NoError(t, err)
+	assert.Len(t, dueLater, 1)
+}
+
+func TestWorker_Process_PermanentFailureFails(t *testing.T) {
+	repo := memory.NewRepository()
+	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	pair := testUpdatePair(t)
+
+	provider := &countingProvider{err: domainquotes.NewCurrencyRateError(
+		domainquotes.UnsupportedPairError, "no rate for pair", false, 0, "",
+	)}
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), time.Second)
+
+	req := claimOne(t, repo, pair, fc.Now())
+	require.NoError(t, worker.Process(t.Context(), req))
+
+	gotReq, _, err := repo.GetUpdateByID(t.Context(), req.ID)
+	require.NoError(t, err)
+	assert.Equal(t, domainquotes.StatusFailed, gotReq.Status)
+}
+
+func TestWorker_Process_RateLimitedDefersWithoutCallingProvider(t *testing.T) {
+	repo := memory.NewRepository()
+	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	pair := testUpdatePair(t)
+
+	provider := &countingProvider{rate: quotes.ProviderQuote{
+		Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now(),
+	}}
+	limiter := quotes.NewRateLimiter(1, 1)
+	ok, _ := limiter.Allow(fc.Now()) // consumes the only slot
+	require.True(t, ok)
+
+	worker := quotes.NewWorker(repo, provider, fc, limiter, time.Second)
+
+	req := claimOne(t, repo, pair, fc.Now())
+	require.NoError(t, worker.Process(t.Context(), req))
+
+	assert.Equal(t, 0, provider.callCount(), "budget exhausted: provider must not be called")
+
+	gotReq, _, err := repo.GetUpdateByID(t.Context(), req.ID)
+	require.NoError(t, err)
+	assert.Equal(t, domainquotes.StatusPending, gotReq.Status, "deferred, not failed")
+}
+
+func TestWorker_Process_InvalidRateFromProviderFails(t *testing.T) {
+	repo := memory.NewRepository()
+	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	pair := testUpdatePair(t)
+
+	provider := &countingProvider{rate: quotes.ProviderQuote{
+		Value: decimal.Zero, Quality: "live", QuotedAt: fc.Now(),
+	}}
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), time.Second)
+
+	req := claimOne(t, repo, pair, fc.Now())
+	require.NoError(t, worker.Process(t.Context(), req))
+
+	gotReq, gotRate, err := repo.GetUpdateByID(t.Context(), req.ID)
+	require.NoError(t, err)
+	assert.Equal(t, domainquotes.StatusFailed, gotReq.Status, "a non-positive rate fails NewCurrencyRate's own validation: not retryable")
+	assert.Nil(t, gotRate)
+}
