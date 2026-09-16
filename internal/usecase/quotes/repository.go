@@ -29,10 +29,21 @@ type Repository interface {
 	// job, folded into the same claim.
 	ClaimBatch(ctx context.Context, limit int, now, visibleSince time.Time) ([]quotes.CurrencyRateUpdateRequest, error)
 
+	// CompleteSuccess closes id by inserting rate as a new quotes row (or
+	// deduping onto an existing one with the same provider/pair/quoted_at)
+	// and pointing id's quote_id at it. Only for a freshly fetched rate —
+	// see CompleteSuccessReuse for the cache-hit path.
 	CompleteSuccess(ctx context.Context, id uuid.UUID, pair quotes.CurrencyPair, rate quotes.CurrencyRate, now time.Time) error
+	// CompleteSuccessReuse closes id by pointing its quote_id at an
+	// already-existing quotes row (quoteID, from GetLatestQuote) without
+	// inserting anything — the reuse path for a still-fresh quote.
+	CompleteSuccessReuse(ctx context.Context, id uuid.UUID, quoteID int64, now time.Time) error
 	CompleteFailure(ctx context.Context, id uuid.UUID, errCode, errMessage string, retryable bool, nextAttemptAt, now time.Time) error
 	GetUpdateByID(ctx context.Context, id uuid.UUID) (quotes.CurrencyRateUpdateRequest, *quotes.CurrencyRate, error)
 
-	// GetLatestQuote orders by quoted_at then id.
-	GetLatestQuote(ctx context.Context, pair quotes.CurrencyPair) (quotes.CurrencyRate, error)
+	// GetLatestQuote orders by quoted_at then id, and also returns that
+	// row's own id, so a caller that decides to reuse it (still inside its
+	// StaleAfter window) can record that reuse via CompleteSuccessReuse
+	// without a second lookup.
+	GetLatestQuote(ctx context.Context, pair quotes.CurrencyPair) (quotes.CurrencyRate, int64, error)
 }

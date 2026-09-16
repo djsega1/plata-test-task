@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
@@ -92,8 +93,8 @@ func TestDispatcher_ClaimAndDispatch_PendingToSucceeded(t *testing.T) {
 	provider := &countingProvider{rate: quotes.ProviderQuote{
 		Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now(),
 	}}
-	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second)
-	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), 10, 4, time.Hour)
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second, time.Minute, 5)
+	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), 10, 4, time.Hour, time.Minute)
 
 	_, err := dispatcher.ClaimAndDispatch(t.Context())
 	require.NoError(t, err)
@@ -124,8 +125,8 @@ func TestDispatcher_PanicInOneUpdateDoesNotStopTheBatch(t *testing.T) {
 		panicPair: &panicPair,
 		rate:      quotes.ProviderQuote{Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now()},
 	}
-	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second)
-	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), 10, 4, time.Hour)
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second, time.Minute, 5)
+	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), 10, 4, time.Hour, time.Minute)
 
 	require.NotPanics(t, func() {
 		_, err := dispatcher.ClaimAndDispatch(t.Context())
@@ -169,7 +170,7 @@ func TestDispatcher_SamePairSingleFlightsToOneProviderCall(t *testing.T) {
 		gate: make(chan struct{}),
 		rate: quotes.ProviderQuote{Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now()},
 	}
-	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second)
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second, time.Minute, 5)
 
 	var ready, done sync.WaitGroup
 	ready.Add(numRequests)
@@ -242,8 +243,8 @@ func TestDispatcher_DifferentPairsRunConcurrently(t *testing.T) {
 		arrived: make(chan struct{}),
 		rate:    quotes.ProviderQuote{Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now()},
 	}
-	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second)
-	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), 10, 6, time.Hour)
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second, time.Minute, 5)
+	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), 10, 6, time.Hour, time.Minute)
 
 	done := make(chan error, 1)
 	go func() {
@@ -275,6 +276,69 @@ func TestDispatcher_DifferentPairsRunConcurrently(t *testing.T) {
 	}
 }
 
+// Simulates two replicas (two independent Dispatcher/Worker/RateLimiter
+// stacks, each with its own process-local singleflight.Group) sharing one
+// Repository: only ClaimBatch's atomic claim prevents double-processing,
+// not single-flight, which can't coordinate across replicas.
+func TestDispatcher_TwoReplicasSharingOneRepositoryDoNotDoubleProcess(t *testing.T) {
+	repo := memory.NewRepository()
+	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	pair := testPair(t)
+
+	const numRequests = 20
+	ids := make([]uuid.UUID, numRequests)
+	for i := range numRequests {
+		req := domainquotes.NewCurrencyRateUpdateRequest(pair, fc.Now())
+		require.NoError(t, repo.CreateUpdateRequest(t.Context(), req, ""))
+		ids[i] = req.ID
+	}
+
+	// batchSize (8) deliberately smaller than numRequests (20): neither
+	// replica can drain the queue alone in one pass, so both must actually
+	// claim rows for the "no overlap" assertion below to mean anything.
+	newReplica := func() *quotes.Dispatcher {
+		provider := &countingProvider{rate: quotes.ProviderQuote{
+			Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now(),
+		}}
+		worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second, time.Minute, 5)
+		return quotes.NewDispatcher(repo, fc, worker, discardLogger(), 8, 4, time.Hour, time.Minute)
+	}
+	replicaA, replicaB := newReplica(), newReplica()
+
+	// Keep both replicas claiming concurrently until neither sees a full
+	// batch — mirrors Run's own "full batch means more work" loop, just
+	// driven by hand from two independent Dispatchers instead of one.
+	for {
+		var fullA, fullB bool
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			var err error
+			fullA, err = replicaA.ClaimAndDispatch(t.Context())
+			assert.NoError(t, err)
+		}()
+		go func() {
+			defer wg.Done()
+			var err error
+			fullB, err = replicaB.ClaimAndDispatch(t.Context())
+			assert.NoError(t, err)
+		}()
+		wg.Wait()
+		if !fullA && !fullB {
+			break
+		}
+	}
+
+	for _, id := range ids {
+		gotReq, _, err := repo.GetUpdateByID(t.Context(), id)
+		require.NoError(t, err)
+		assert.Equal(t, domainquotes.StatusSucceeded, gotReq.Status,
+			"id %s must resolve exactly once even claimed by either of two independent replicas", id)
+		assert.Equal(t, 1, gotReq.Attempts, "id %s must not be claimed twice", id)
+	}
+}
+
 func TestDispatcher_ExhaustedBudgetDefersWithoutFailing(t *testing.T) {
 	repo := memory.NewRepository()
 	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
@@ -290,8 +354,8 @@ func TestDispatcher_ExhaustedBudgetDefersWithoutFailing(t *testing.T) {
 	ok, _ := limiter.Allow(fc.Now()) // consume the only slot before the dispatcher runs
 	require.True(t, ok)
 
-	worker := quotes.NewWorker(repo, provider, fc, limiter, discardLogger(), time.Second)
-	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), 10, 4, time.Hour)
+	worker := quotes.NewWorker(repo, provider, fc, limiter, discardLogger(), time.Second, time.Minute, 5)
+	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), 10, 4, time.Hour, time.Minute)
 
 	_, err := dispatcher.ClaimAndDispatch(t.Context())
 	require.NoError(t, err)
@@ -318,8 +382,8 @@ func TestDispatcher_Run(t *testing.T) {
 	provider := &countingProvider{rate: quotes.ProviderQuote{
 		Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now(),
 	}}
-	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second)
-	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), 10, 4, time.Hour)
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second, time.Minute, 5)
+	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), 10, 4, time.Hour, time.Minute)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	nudge := make(chan struct{})
@@ -373,8 +437,10 @@ func (panicOnClaimBatchRepository) ClaimBatch(context.Context, int, time.Time, t
 // succeeds once Run is back at its select after surviving the first.
 func TestDispatcher_Run_PanicInClaimBatchDoesNotCrashTheProcess(t *testing.T) {
 	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-	worker := quotes.NewWorker(memory.NewRepository(), &countingProvider{}, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second)
-	dispatcher := quotes.NewDispatcher(panicOnClaimBatchRepository{}, fc, worker, discardLogger(), 10, 4, time.Hour)
+	worker := quotes.NewWorker(
+		memory.NewRepository(), &countingProvider{}, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second, time.Minute, 5,
+	)
+	dispatcher := quotes.NewDispatcher(panicOnClaimBatchRepository{}, fc, worker, discardLogger(), 10, 4, time.Hour, time.Minute)
 
 	nudge := make(chan struct{})
 	tick := make(chan time.Time)
@@ -407,8 +473,8 @@ func TestDispatcher_Run_CancelDuringPassDoesNotAbortIt(t *testing.T) {
 			Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now(),
 		},
 	}
-	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second)
-	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), 10, 4, time.Hour)
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second, time.Minute, 5)
+	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), 10, 4, time.Hour, time.Minute)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	nudge := make(chan struct{})
@@ -474,9 +540,9 @@ func TestDispatcher_Run_FullBatchKeepsDrainingWithoutWaitingForNudgeOrTick(t *te
 	provider := &countingProvider{rate: quotes.ProviderQuote{
 		Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now(),
 	}}
-	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second)
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second, time.Minute, 5)
 	const batchSize = 2
-	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), batchSize, batchSize, time.Hour)
+	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), batchSize, batchSize, time.Hour, time.Minute)
 
 	nudge := make(chan struct{})
 	tick := make(chan time.Time)

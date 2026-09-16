@@ -27,5 +27,5 @@ func NewRouter(
 	mux.HandleFunc(http.MethodGet+" "+apiV1Prefix+"/quotes/updates/{id}", getQuotesUpdateHandler(logger, repo))
 	mux.HandleFunc(http.MethodGet+" "+apiV1Prefix+"/quotes/latest", getQuotesLatestHandler(logger, repo))
 
-	return corsMiddleware(recoverMiddleware(logger, loggingMiddleware(logger, mux)))
+	return corsMiddleware(requestIDMiddleware(recoverMiddleware(logger, loggingMiddleware(logger, mux))))
 }

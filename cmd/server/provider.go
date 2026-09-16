@@ -18,11 +18,8 @@ import (
 func newRateProvider(cfg config.Config) (quotes.RateProvider, error) {
 	switch cfg.Provider {
 	case config.ProviderFake:
-		// cfg.FakeProviderMinDelay/MaxDelay/RPMQuota default to zero: no
-		// simulated delay or internal quota, since RateLimiter is the
-		// single source of quota truth for the real dispatcher. A demo run
-		// can opt into them via env to make the async nature of the API
-		// visible.
+		// Delay/quota fields default to zero (RateLimiter is the real quota
+		// source); a demo run can opt in via env to show async behavior.
 		return fake.NewFakeRateProvider(
 			clock.NewSystemClock(), cfg.FakeProviderMinDelay, cfg.FakeProviderMaxDelay, cfg.FakeProviderRPMQuota, cfg.QuoteTTL,
 		), nil
@@ -32,10 +29,8 @@ func newRateProvider(cfg config.Config) (quotes.RateProvider, error) {
 			exchangeratedev.DefaultBaseURL, os.Getenv("PROVIDER_API_KEY"), client, cfg.QuoteTTL,
 		), nil
 	default:
-		// Unreachable in practice: config.Load already rejects any other
-		// value. Kept as a real error, not a panic, so a future Provider
-		// value added to config without a matching case here fails loudly
-		// at startup instead of nil-pointer-dereferencing later.
+		// Unreachable today (config.Load rejects other values); kept as a
+		// real error so a future Provider value fails loudly at startup.
 		return nil, fmt.Errorf("no adapter wired for provider %q", cfg.Provider)
 	}
 }

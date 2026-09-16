@@ -45,6 +45,6 @@ func RequestUpdate(
 		return RequestUpdateResult{Request: existing, Replayed: true}, nil
 	}
 
-	logger.Info("update requested", "id", req.ID, "pair", pair.String())
+	logger.Info("update request created", "id", req.ID, "pair", pair.String())
 	return RequestUpdateResult{Request: req}, nil
 }

@@ -12,5 +12,6 @@ func GetLatest(ctx context.Context, repo Repository, rawPair string) (domainquot
 	if err != nil {
 		return domainquotes.CurrencyRate{}, err
 	}
-	return repo.GetLatestQuote(ctx, pair)
+	rate, _, err := repo.GetLatestQuote(ctx, pair)
+	return rate, err
 }

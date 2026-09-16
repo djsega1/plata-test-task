@@ -17,6 +17,11 @@ import (
 // DefaultBaseURL is the production exchangerate.dev endpoint.
 const DefaultBaseURL = "https://api.exchangerate.dev"
 
+// maxResponseBodyBytes bounds how much of a /v1/rate response this adapter
+// will read. A legitimate response is a few hundred bytes; this is
+// generous headroom, not a tuned limit.
+const maxResponseBodyBytes = 1 << 20 // 1 MiB
+
 var _ quotes.RateProvider = (*ExchangerateDevProvider)(nil)
 
 type ExchangerateDevProvider struct {
@@ -80,12 +85,24 @@ func (e *ExchangerateDevProvider) GetCurrencyRate(ctx context.Context, pair doma
 
 	resp, err := e.httpClient.Do(req)
 	if err != nil {
-		// not a provider error: this is the caller's context, return it as is.
-		return quotes.ProviderQuote{}, err
+		if ctx.Err() != nil {
+			// Caller's own context ended this, not the upstream's fault —
+			// pass through unnormalised rather than record a provider failure.
+			return quotes.ProviderQuote{}, err
+		}
+		// Network/DNS/TLS failure: upstream unreachable, not rejecting the
+		// request. Classified retryable so Worker.fail can act on it instead
+		// of leaving the row in_progress until the reaper reclaims it.
+		return quotes.ProviderQuote{}, domainquotes.NewCurrencyRateError(
+			domainquotes.ProviderUnavailableError, "request failed: "+err.Error(), true, 0, "",
+		)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	// Bounds a misbehaving or compromised upstream that streams an
+	// unbounded body: the client-side timeout limits how long that can run,
+	// not how much memory it can consume in the meantime.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes))
 	if err != nil {
 		return quotes.ProviderQuote{}, domainquotes.NewCurrencyRateError(
 			domainquotes.MalformedResponseError, "reading response body: "+err.Error(), false, 0, "",

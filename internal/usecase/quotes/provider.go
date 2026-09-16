@@ -8,12 +8,10 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// ProviderQuote is what an adapter's own fetch returns — not yet a
-// validated domain CurrencyRate. It skips domainquotes.NewCurrencyRate's
-// invariant check on purpose: a raw upstream value isn't safe to persist
-// yet, and giving it its own type stops it from being mistaken for one.
-// Worker builds the real CurrencyRate from this plus Provider/Indicative/
-// StaleAfter (same RateProvider) and its own clock for FetchedAt.
+// ProviderQuote is what an adapter's fetch returns — not yet a validated
+// domain CurrencyRate, since a raw upstream value isn't safe to persist
+// yet. Worker builds the real CurrencyRate from this plus
+// Provider/Indicative/StaleAfter and its own clock for FetchedAt.
 type ProviderQuote struct {
 	Value    decimal.Decimal
 	Derived  bool

@@ -90,7 +90,7 @@ func TestRequestUpdate_LogsCreated(t *testing.T) {
 	result, err := quotes.RequestUpdate(t.Context(), bufferLogger(&buf, slog.LevelInfo), repo, fc, "EUR/USD", "")
 	require.NoError(t, err)
 
-	line := findLogLine(t, decodeLogLines(t, &buf), "update requested")
+	line := findLogLine(t, decodeLogLines(t, &buf), "update request created")
 	assert.Equal(t, "EUR/USD", line["pair"])
 	assert.Equal(t, result.Request.ID.String(), line["id"])
 }

@@ -192,9 +192,10 @@ func TestCompleteSuccess(t *testing.T) {
 	assert.True(t, rate.FetchedAt.Equal(gotRate.FetchedAt))
 	assert.True(t, rate.StaleAfter.Equal(gotRate.StaleAfter))
 
-	latest, err := repo.GetLatestQuote(ctx, pair)
+	latest, latestID, err := repo.GetLatestQuote(ctx, pair)
 	require.NoError(t, err)
 	assert.True(t, rate.Value.Equal(latest.Value))
+	assert.NotZero(t, latestID)
 }
 
 // TestCompleteSuccess_ClearsPriorFailure covers a request that failed once
@@ -235,6 +236,48 @@ func TestCompleteSuccess_RequiresInProgress(t *testing.T) {
 	// Not claimed — still pending.
 
 	err := repo.CompleteSuccess(ctx, req.ID, pair, testRate(t, now), now)
+	assert.Error(t, err)
+}
+
+func TestCompleteSuccessReuse(t *testing.T) {
+	repo := memory.NewRepository()
+	ctx := t.Context()
+	now := testNow
+	pair := testPair(t)
+
+	first := domainquotes.NewCurrencyRateUpdateRequest(pair, now)
+	require.NoError(t, repo.CreateUpdateRequest(ctx, first, ""))
+	second := domainquotes.NewCurrencyRateUpdateRequest(pair, now)
+	require.NoError(t, repo.CreateUpdateRequest(ctx, second, ""))
+
+	_, err := repo.ClaimBatch(ctx, 10, now, now.Add(-time.Hour))
+	require.NoError(t, err)
+
+	rate := testRate(t, now)
+	require.NoError(t, repo.CompleteSuccess(ctx, first.ID, pair, rate, now))
+
+	_, quoteID, err := repo.GetLatestQuote(ctx, pair)
+	require.NoError(t, err)
+	require.NoError(t, repo.CompleteSuccessReuse(ctx, second.ID, quoteID, now))
+
+	gotReq, gotRate, err := repo.GetUpdateByID(ctx, second.ID)
+	require.NoError(t, err)
+	assert.Equal(t, domainquotes.StatusSucceeded, gotReq.Status)
+	require.NotNil(t, gotRate)
+	assert.True(t, rate.Value.Equal(gotRate.Value))
+}
+
+func TestCompleteSuccessReuse_RequiresInProgress(t *testing.T) {
+	repo := memory.NewRepository()
+	ctx := t.Context()
+	now := testNow
+	pair := testPair(t)
+
+	req := domainquotes.NewCurrencyRateUpdateRequest(pair, now)
+	require.NoError(t, repo.CreateUpdateRequest(ctx, req, ""))
+	// Not claimed — still pending.
+
+	err := repo.CompleteSuccessReuse(ctx, req.ID, 1, now)
 	assert.Error(t, err)
 }
 
@@ -301,7 +344,7 @@ func TestCompleteFailure_RequiresInProgress(t *testing.T) {
 func TestGetLatestQuote_NotFound(t *testing.T) {
 	repo := memory.NewRepository()
 
-	_, err := repo.GetLatestQuote(t.Context(), testPair(t))
+	_, _, err := repo.GetLatestQuote(t.Context(), testPair(t))
 	assert.ErrorIs(t, err, quotes.ErrNotFound)
 }
 
@@ -325,7 +368,7 @@ func TestGetLatestQuote_OrdersByQuotedAtNotWriteOrder(t *testing.T) {
 	require.NoError(t, repo.CompleteSuccess(ctx, newer.ID, pair, newerRate, now))
 	require.NoError(t, repo.CompleteSuccess(ctx, older.ID, pair, olderRate, now))
 
-	latest, err := repo.GetLatestQuote(ctx, pair)
+	latest, _, err := repo.GetLatestQuote(ctx, pair)
 	require.NoError(t, err)
 	assert.True(t, newerRate.Value.Equal(latest.Value))
 }

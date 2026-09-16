@@ -49,15 +49,10 @@ func (c CurrencyRateError) Retryable() bool             { return c.retryable }
 func (c CurrencyRateError) RetryAfter() time.Duration   { return c.retryAfter }
 func (c CurrencyRateError) ProviderCode() string        { return c.providerCode }
 
-// NewCurrencyRateError panics on an invalid code rather than returning an
-// error: unlike CurrencyCode (parsed from a client-supplied pair string,
-// see NewCurrencyCode) or CurrencyPair, code here is never derived from
-// external input — every caller passes one of the constants above, and the
-// raw upstream string goes in providerCode instead. An invalid code can
-// only be a programming mistake, so there's nothing a caller could do with
-// a returned error except panic anyway; failing loudly here, at the
-// mistake's origin, beats forcing every call site to carry unreachable
-// error handling for it.
+// NewCurrencyRateError panics on an invalid code instead of returning an
+// error: code is never derived from external input (the raw upstream
+// string goes in providerCode instead), so an invalid code can only be a
+// programming mistake.
 func NewCurrencyRateError(
 	code CurrencyRateErrorCode,
 	message string,

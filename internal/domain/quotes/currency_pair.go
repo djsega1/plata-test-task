@@ -6,12 +6,9 @@ import (
 	"strings"
 )
 
-// ErrMalformedPair and ErrPairNotAllowed distinguish two different failure
-// shapes that ParseCurrencyPair/NewCurrencyPair used to both report as the
-// same opaque error: a string that isn't even shaped like a pair, versus a
-// well-formed pair this service just doesn't support. The api/http layer
-// maps them to 400 and 422 respectively — a malformed shape is a bad
-// request, not a rejected allow-list lookup.
+// ErrMalformedPair is a string that isn't even shaped like a pair;
+// ErrPairNotAllowed is a well-formed pair this service doesn't support.
+// api/http maps them to 400 and 422 respectively.
 var (
 	ErrMalformedPair  = errors.New("pair is in wrong format")
 	ErrPairNotAllowed = errors.New("pair is outside the allow-list")

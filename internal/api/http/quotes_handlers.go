@@ -10,17 +10,19 @@ import (
 	"github.com/djsega1/plata-test-task/internal/usecase/quotes"
 )
 
-// Wire error codes, returned in errorEnvelope.Error.Code (codeInternalError
-// is defined in middleware.go, next to the panic recovery that's its only
-// other caller). A message built from the underlying error (an unsupported
-// pair, an idempotency conflict) stays inline at the call site — only the
-// fixed, repeated ones are worth naming here.
+// Wire error codes, returned in errorEnvelope.Error.Code. Messages built
+// from the underlying error stay inline at the call site; only the fixed,
+// repeated codes are named here.
 const (
 	codeInvalidRequest      = "invalid_request"
 	codeUnsupportedPair     = "unsupported_pair"
 	codeIdempotencyConflict = "idempotency_conflict"
 	codeNotFound            = "not_found"
 )
+
+// maxCreateUpdateBodyBytes bounds POST /quotes/updates' request body — it's
+// one field (a pair string), so this is generous headroom, not a tuned limit.
+const maxCreateUpdateBodyBytes = 4 << 10 // 4 KiB
 
 const (
 	msgMalformedJSON     = "malformed JSON body"
@@ -35,6 +37,9 @@ const (
 // nudgeDispatcher) — tests that don't wire a dispatcher can pass one.
 func postQuotesUpdatesHandler(logger *slog.Logger, repo quotes.Repository, clk quotes.Clock, nudge chan<- struct{}) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Caps how much a client can make this handler read.
+		r.Body = http.MaxBytesReader(w, r.Body, maxCreateUpdateBodyBytes)
+
 		var body createUpdateRequest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeError(logger, w, http.StatusBadRequest, codeInvalidRequest, msgMalformedJSON)
@@ -55,7 +60,7 @@ func postQuotesUpdatesHandler(logger *slog.Logger, repo quotes.Repository, clk q
 			case errors.Is(err, quotes.ErrIdempotencyConflict):
 				writeError(logger, w, http.StatusConflict, codeIdempotencyConflict, err.Error())
 			default:
-				logger.Error("request update", "error", err)
+				logger.Error("request update", "error", err, "request_id", requestIDFromContext(r.Context()))
 				writeError(logger, w, http.StatusInternalServerError, codeInternalError, msgInternalError)
 			}
 			return
@@ -68,22 +73,31 @@ func postQuotesUpdatesHandler(logger *slog.Logger, repo quotes.Repository, clk q
 		} else {
 			nudgeDispatcher(nudge)
 		}
+
+		// The one place request_id and update_id are logged together
+		// (see requestIDMiddleware) so the two are traceable to each other.
+		logger.Info("update requested",
+			"request_id", requestIDFromContext(r.Context()),
+			"update_id", result.Request.ID, "pair", body.Pair, "replayed", result.Replayed,
+		)
 		writeJSON(logger, w, status, newCreateUpdateResponse(result.Request))
 	}
 }
 
 // getQuotesUpdateHandler reports the state of one update request. An
-// unparseable id is treated the same as an unknown one (404): both mean
-// "this service has no such update", which is all a client-supplied opaque
-// id can ever tell it.
+// unparseable id is treated as an unknown one (404); any other error must
+// not be reported as "no such update", since that would wrongly tell a
+// polling client to stop for good.
 func getQuotesUpdateHandler(logger *slog.Logger, repo quotes.Repository) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		req, rate, err := quotes.GetByUpdateID(r.Context(), repo, r.PathValue("id"))
 		if err != nil {
-			// Both an unknown id (ErrNotFound) and an unparseable one
-			// (uuid.Parse's error, which isn't ErrNotFound) land here and
-			// get the same 404 — see the doc comment above.
-			writeError(logger, w, http.StatusNotFound, codeNotFound, msgNoSuchUpdate)
+			if errors.Is(err, quotes.ErrNotFound) {
+				writeError(logger, w, http.StatusNotFound, codeNotFound, msgNoSuchUpdate)
+				return
+			}
+			logger.Error("get update by id", "error", err, "request_id", requestIDFromContext(r.Context()))
+			writeError(logger, w, http.StatusInternalServerError, codeInternalError, msgInternalError)
 			return
 		}
 
@@ -113,7 +127,7 @@ func getQuotesLatestHandler(logger *slog.Logger, repo quotes.Repository) http.Ha
 			case errors.Is(err, quotes.ErrNotFound):
 				writeError(logger, w, http.StatusNotFound, codeNotFound, msgNoQuoteYet)
 			default:
-				logger.Error("get latest", "error", err)
+				logger.Error("get latest", "error", err, "request_id", requestIDFromContext(r.Context()))
 				writeError(logger, w, http.StatusInternalServerError, codeInternalError, msgInternalError)
 			}
 			return
@@ -122,17 +136,10 @@ func getQuotesLatestHandler(logger *slog.Logger, repo quotes.Repository) http.Ha
 	}
 }
 
-// nudgeDispatcher wakes Dispatcher.Run (see usecase/quotes/dispatcher.go) if
-// it happens to be idle and waiting on nudge right now. The send only
-// succeeds in that exact case; the select's default case makes it
-// non-blocking otherwise, so this never makes the HTTP response wait:
-//   - nudge is nil (no dispatcher wired, e.g. in tests): send blocks
-//     forever, so default always wins.
-//   - the dispatcher is mid claim-and-dispatch, not yet back at its select:
-//     nothing is listening yet, so default wins.
-//
-// Either way nothing is lost — the periodic tick will pick up the new row
-// on its own next pass, just a little later.
+// nudgeDispatcher wakes Dispatcher.Run if it's idle and waiting on nudge;
+// the select's default makes it non-blocking otherwise, so the HTTP
+// response never waits on it. If the nudge is dropped, the periodic tick
+// picks up the new row later.
 func nudgeDispatcher(nudge chan<- struct{}) {
 	select {
 	case nudge <- struct{}{}:

@@ -54,6 +54,9 @@ func TestLoadDefaults(t *testing.T) {
 		DispatchPoolSize:          defaultDispatchPoolSize,
 		DispatchVisibilityTimeout: defaultDispatchVisibilityTimeout,
 		DispatchBaseBackoff:       defaultDispatchBaseBackoff,
+		DispatchMaxBackoff:        defaultDispatchMaxBackoff,
+		DispatchMaxAttempts:       defaultDispatchMaxAttempts,
+		DispatchPassTimeout:       defaultDispatchPassTimeout,
 
 		ProviderHTTPTimeout:             defaultProviderHTTPTimeout,
 		ProviderHTTPMaxIdleConnsPerHost: defaultProviderHTTPMaxIdleConnsPerHost,
@@ -172,6 +175,9 @@ func TestLoadDispatchOverrides(t *testing.T) {
 		"DISPATCH_POOL_SIZE":          "4",
 		"DISPATCH_VISIBILITY_TIMEOUT": "1m",
 		"DISPATCH_BASE_BACKOFF":       "2s",
+		"DISPATCH_MAX_BACKOFF":        "1m",
+		"DISPATCH_MAX_ATTEMPTS":       "3",
+		"DISPATCH_PASS_TIMEOUT":       "30s",
 	})
 	cfg, err := Load(nil, fakeGetenv(env))
 	require.NoError(t, err)
@@ -181,6 +187,47 @@ func TestLoadDispatchOverrides(t *testing.T) {
 	assert.Equal(t, 4, cfg.DispatchPoolSize)
 	assert.Equal(t, time.Minute, cfg.DispatchVisibilityTimeout)
 	assert.Equal(t, 2*time.Second, cfg.DispatchBaseBackoff)
+	assert.Equal(t, time.Minute, cfg.DispatchMaxBackoff)
+	assert.Equal(t, 3, cfg.DispatchMaxAttempts)
+	assert.Equal(t, 30*time.Second, cfg.DispatchPassTimeout)
+}
+
+func TestLoadPostgresMaxConnsOverride(t *testing.T) {
+	cfg, err := Load(nil, fakeGetenv(withEnv(map[string]string{"POSTGRES_MAX_CONNS": "25"})))
+	require.NoError(t, err)
+	assert.Equal(t, 25, cfg.PostgresMaxConns)
+}
+
+func TestLoadPostgresMaxConnsZeroIsValid(t *testing.T) {
+	cfg, err := Load(nil, fakeGetenv(withEnv(map[string]string{"POSTGRES_MAX_CONNS": "0"})))
+	require.NoError(t, err)
+	assert.Zero(t, cfg.PostgresMaxConns)
+}
+
+func TestLoadPostgresMaxConnsNegativeInvalid(t *testing.T) {
+	_, err := Load(nil, fakeGetenv(withEnv(map[string]string{"POSTGRES_MAX_CONNS": "-1"})))
+	assert.Error(t, err)
+}
+
+func TestLoadPostgresPoolTuningOverride(t *testing.T) {
+	cfg, err := Load(nil, fakeGetenv(withEnv(map[string]string{
+		"POSTGRES_MAX_CONN_LIFETIME":   "30m",
+		"POSTGRES_HEALTH_CHECK_PERIOD": "15s",
+	})))
+	require.NoError(t, err)
+	assert.Equal(t, 30*time.Minute, cfg.PostgresMaxConnLifetime)
+	assert.Equal(t, 15*time.Second, cfg.PostgresHealthCheckPeriod)
+}
+
+func TestLoadPostgresPoolTuningZeroIsValid(t *testing.T) {
+	cfg, err := Load(nil, fakeGetenv(withEnv(map[string]string{"POSTGRES_MAX_CONN_LIFETIME": "0s"})))
+	require.NoError(t, err)
+	assert.Zero(t, cfg.PostgresMaxConnLifetime)
+}
+
+func TestLoadPostgresPoolTuningNegativeInvalid(t *testing.T) {
+	_, err := Load(nil, fakeGetenv(withEnv(map[string]string{"POSTGRES_HEALTH_CHECK_PERIOD": "-1s"})))
+	assert.Error(t, err)
 }
 
 func TestLoadRateLimitInvalid(t *testing.T) {

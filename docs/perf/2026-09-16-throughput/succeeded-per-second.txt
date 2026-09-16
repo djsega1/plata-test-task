@@ -1,0 +1,52 @@
+$ ./scripts/throughput.sh   # after ClaimBatch split-CTE rewrite + CompleteSuccessReuse no longer writing to quotes
+==> generating POST-only load for 20s at concurrency=50
+requests: 51938 (ok=51887, errors=51) over 20s -> 2596.9 req/s
+latency: min=1.9759ms p50=14.4147ms p90=20.0027ms p99=55.4078ms max=5.5156006s
+status codes:
+  202: 51887
+==> waiting for the queue to drain (pending/in_progress -> 0, up to 30s)
+    remaining in flight: 0
+==> succeeded rows per second
+  second  | succeeded
+----------+-----------
+ 13:57:36 |        61
+ 13:57:37 |       290
+ 13:57:38 |       300
+ 13:57:39 |       305
+ 13:57:40 |       295
+ 13:57:41 |       304
+ 13:57:42 |       312
+ 13:57:43 |       304
+ 13:57:44 |       300
+ 13:57:45 |       309
+ 13:57:46 |       323
+ 13:57:47 |       316
+ 13:57:48 |       440
+ 13:57:49 |      1092
+ 13:57:50 |       920
+ 13:57:51 |      1638
+ 13:57:52 |      1157
+ 13:57:53 |      1093
+ 13:57:54 |      1136
+ 13:57:55 |      1376
+ 13:57:56 |      1641
+ 13:57:57 |      2625
+ 13:57:58 |      2893
+ 13:57:59 |      3011
+ 13:58:00 |      2802
+ 13:58:01 |      2625
+ 13:58:02 |      2844
+ 13:58:03 |      2892
+ 13:58:04 |      2917
+ 13:58:05 |      2808
+ 13:58:06 |      2742
+ 13:58:07 |      2678
+ 13:58:08 |      2722
+ 13:58:09 |      2691
+ 13:58:10 |      1749
+(35 rows)
+
+created=51911 succeeded=51911 failed=0
+best 10-second window: 28212 quotes/10s (rows reaching succeeded, i.e. queue-drain rate)
+distinct (base,quote) actually fetched from the provider during the run: 6
+  (the rest reused an existing quote inside its stale_after window)

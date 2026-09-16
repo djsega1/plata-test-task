@@ -1,10 +1,7 @@
 // Command throughput fires concurrent POST /quotes/updates requests at a
 // running server for a fixed duration and reports latency percentiles and
-// status-code counts. Paired with scripts/throughput.sh, which queries the
-// database afterwards for the number that actually matters — how many
-// quote_updates the background pipeline carries to succeeded per 10
-// seconds. Stdlib only, deliberately: this is a one-off measurement tool,
-// not a service dependency, so it doesn't belong in go.mod.
+// status-code counts. Stdlib only — a one-off measurement tool, not a
+// service dependency.
 package main
 
 import (

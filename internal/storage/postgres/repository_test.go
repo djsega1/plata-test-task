@@ -37,7 +37,7 @@ func newTestPool(t *testing.T) *pgxpool.Pool {
 	require.NoError(t, postgres.Migrate(t.Context(), databaseURL))
 
 	ctx := t.Context()
-	pool, err := postgres.NewPool(ctx, databaseURL)
+	pool, err := postgres.NewPool(ctx, databaseURL, 0, 0, 0)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 
@@ -167,6 +167,51 @@ func TestClaimBatch_ReclaimsStuckInProgress(t *testing.T) {
 	assert.Equal(t, 2, attempts, "one attempt per claim: initial + reclaim")
 }
 
+// TestClaimBatch_MergesPendingAndStuckByPriority exercises ClaimBatch's
+// pending_candidates/stuck_candidates split together in one call, not each
+// in isolation like the two tests above: a stuck row and a newer pending
+// row both eligible at once, with limit=1 forcing ClaimBatch to pick one —
+// it must be the stuck row, since its own next_attempt_at (unchanged by the
+// earlier claim that made it in_progress) is older than the pending row's.
+func TestClaimBatch_MergesPendingAndStuckByPriority(t *testing.T) {
+	pool := newTestPool(t)
+	repo := postgres.NewRepository(pool)
+	ctx := t.Context()
+	pair := testPair(t)
+
+	older := domainquotes.NewCurrencyRateUpdateRequest(pair, testNow)
+	require.NoError(t, repo.CreateUpdateRequest(ctx, older, ""))
+	newer := domainquotes.NewCurrencyRateUpdateRequest(pair, testNow.Add(time.Minute))
+	require.NoError(t, repo.CreateUpdateRequest(ctx, newer, ""))
+
+	// Claim and strand "older" as stuck in_progress — its next_attempt_at
+	// column is untouched by this claim, so it stays testNow.
+	claimed, err := repo.ClaimBatch(ctx, 1, testNow, testNow.Add(-time.Hour))
+	require.NoError(t, err)
+	require.Len(t, claimed, 1)
+	require.Equal(t, older.ID, claimed[0].ID)
+	_, err = pool.Exec(ctx, "UPDATE quote_updates SET locked_at = $1 WHERE id = $2", testNow.Add(-time.Hour), older.ID)
+	require.NoError(t, err)
+
+	// Both older (stuck, next_attempt_at = testNow) and newer (pending,
+	// next_attempt_at = testNow+1m) are now eligible. limit=1 must pick the
+	// stuck row: its priority is older, even though it comes from the
+	// stuck_candidates CTE, not pending_candidates.
+	now := testNow.Add(2 * time.Minute)
+	visibleSince := testNow.Add(time.Minute)
+	first, err := repo.ClaimBatch(ctx, 1, now, visibleSince)
+	require.NoError(t, err)
+	require.Len(t, first, 1)
+	assert.Equal(t, older.ID, first[0].ID, "the stuck row's older next_attempt_at must win priority over the pending row")
+
+	// A second call claims what's left — both rows end up claimed exactly
+	// once between the two calls, proving the merge doesn't drop either side.
+	second, err := repo.ClaimBatch(ctx, 10, now, visibleSince)
+	require.NoError(t, err)
+	require.Len(t, second, 1)
+	assert.Equal(t, newer.ID, second[0].ID)
+}
+
 func TestCompleteSuccess(t *testing.T) {
 	pool := newTestPool(t)
 	repo := postgres.NewRepository(pool)
@@ -196,9 +241,10 @@ func TestCompleteSuccess(t *testing.T) {
 	assert.WithinDuration(t, rate.FetchedAt, gotRate.FetchedAt, time.Millisecond)
 	assert.WithinDuration(t, rate.StaleAfter, gotRate.StaleAfter, time.Millisecond)
 
-	latest, err := repo.GetLatestQuote(ctx, pair)
+	latest, latestID, err := repo.GetLatestQuote(ctx, pair)
 	require.NoError(t, err)
 	assert.True(t, rate.Value.Equal(latest.Value))
+	assert.NotZero(t, latestID)
 }
 
 // TestCompleteSuccess_ClearsPriorFailure covers a request that failed once
@@ -275,6 +321,60 @@ func TestCompleteSuccess_RequiresInProgress(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// TestCompleteSuccessReuse covers Worker's cache-hit path: closing a
+// request by pointing it at an already-existing quotes row, without
+// inserting anything new. This is the write-amplification fix — without a
+// dedicated method, every reuse (the common case once a pair has a live
+// quote) would re-run the same INSERT ... ON CONFLICT DO UPDATE as a fresh
+// fetch, on every single request instead of only the ones that actually
+// called the provider.
+func TestCompleteSuccessReuse(t *testing.T) {
+	pool := newTestPool(t)
+	repo := postgres.NewRepository(pool)
+	ctx := t.Context()
+	now := testNow
+	pair := testPair(t)
+
+	first := domainquotes.NewCurrencyRateUpdateRequest(pair, now)
+	require.NoError(t, repo.CreateUpdateRequest(ctx, first, ""))
+	second := domainquotes.NewCurrencyRateUpdateRequest(pair, now)
+	require.NoError(t, repo.CreateUpdateRequest(ctx, second, ""))
+
+	_, err := repo.ClaimBatch(ctx, 10, now, now.Add(-time.Hour))
+	require.NoError(t, err)
+
+	require.NoError(t, repo.CompleteSuccess(ctx, first.ID, pair, testRate(t, now), now))
+
+	_, quoteID, err := repo.GetLatestQuote(ctx, pair)
+	require.NoError(t, err)
+	require.NoError(t, repo.CompleteSuccessReuse(ctx, second.ID, quoteID, now))
+
+	var quoteCount int
+	require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM quotes").Scan(&quoteCount))
+	assert.Equal(t, 1, quoteCount, "reuse must not insert a second journal row")
+
+	gotReq, gotRate, err := repo.GetUpdateByID(ctx, second.ID)
+	require.NoError(t, err)
+	assert.Equal(t, domainquotes.StatusSucceeded, gotReq.Status)
+	require.NotNil(t, gotRate)
+	assert.True(t, testRate(t, now).Value.Equal(gotRate.Value))
+}
+
+func TestCompleteSuccessReuse_RequiresInProgress(t *testing.T) {
+	pool := newTestPool(t)
+	repo := postgres.NewRepository(pool)
+	ctx := t.Context()
+	now := testNow
+	pair := testPair(t)
+
+	req := domainquotes.NewCurrencyRateUpdateRequest(pair, now)
+	require.NoError(t, repo.CreateUpdateRequest(ctx, req, ""))
+	// Not claimed — still pending.
+
+	err := repo.CompleteSuccessReuse(ctx, req.ID, 1, now)
+	assert.Error(t, err)
+}
+
 func TestCompleteFailure_Retryable(t *testing.T) {
 	pool := newTestPool(t)
 	repo := postgres.NewRepository(pool)
@@ -330,8 +430,37 @@ func TestGetLatestQuote_NotFound(t *testing.T) {
 	pool := newTestPool(t)
 	repo := postgres.NewRepository(pool)
 
-	_, err := repo.GetLatestQuote(t.Context(), testPair(t))
+	_, _, err := repo.GetLatestQuote(t.Context(), testPair(t))
 	assert.ErrorIs(t, err, quotes.ErrNotFound)
+}
+
+// "Latest" orders by quoted_at DESC, id DESC, not insertion order: the
+// upstream can return a price older than one already stored. Exercises
+// quotes_latest_idx against real Postgres, not just the memory stand-in.
+func TestGetLatestQuote_OrdersByQuotedAtNotWriteOrder(t *testing.T) {
+	pool := newTestPool(t)
+	repo := postgres.NewRepository(pool)
+	ctx := t.Context()
+	now := testNow
+	pair := testPair(t)
+
+	older := domainquotes.NewCurrencyRateUpdateRequest(pair, now)
+	require.NoError(t, repo.CreateUpdateRequest(ctx, older, ""))
+	newer := domainquotes.NewCurrencyRateUpdateRequest(pair, now)
+	require.NoError(t, repo.CreateUpdateRequest(ctx, newer, ""))
+	_, err := repo.ClaimBatch(ctx, 10, now, now.Add(-time.Hour))
+	require.NoError(t, err)
+
+	olderRate := testRate(t, now.Add(-time.Hour))
+	newerRate := testRate(t, now)
+	// Complete the older quoted_at last: fetch/write order must not
+	// matter, only quoted_at.
+	require.NoError(t, repo.CompleteSuccess(ctx, newer.ID, pair, newerRate, now))
+	require.NoError(t, repo.CompleteSuccess(ctx, older.ID, pair, olderRate, now))
+
+	latest, _, err := repo.GetLatestQuote(ctx, pair)
+	require.NoError(t, err)
+	assert.True(t, newerRate.Value.Equal(latest.Value))
 }
 
 func TestGetUpdateByID_NotFound(t *testing.T) {

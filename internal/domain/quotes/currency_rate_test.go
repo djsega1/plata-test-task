@@ -42,4 +42,31 @@ func TestNewCurrencyRate(t *testing.T) {
 			t.Error("want error for negative rate")
 		}
 	})
+
+	t.Run("zero quoted_at", func(t *testing.T) {
+		if _, err := quotes.NewCurrencyRate(
+			decimal.RequireFromString("18.4321"), false, "live", "exchangerate.dev",
+			true, time.Time{}, now, now.Add(time.Minute),
+		); err == nil {
+			t.Error("want error for zero quoted_at")
+		}
+	})
+
+	t.Run("quoted_at far in the future is rejected", func(t *testing.T) {
+		if _, err := quotes.NewCurrencyRate(
+			decimal.RequireFromString("18.4321"), false, "live", "exchangerate.dev",
+			true, now.Add(time.Hour), now, now.Add(time.Hour+time.Minute),
+		); err == nil {
+			t.Error("want error for quoted_at an hour ahead of fetched_at")
+		}
+	})
+
+	t.Run("quoted_at within clock-skew tolerance of fetched_at is accepted", func(t *testing.T) {
+		if _, err := quotes.NewCurrencyRate(
+			decimal.RequireFromString("18.4321"), false, "live", "exchangerate.dev",
+			true, now.Add(10*time.Second), now, now.Add(time.Minute),
+		); err != nil {
+			t.Errorf("unexpected error for quoted_at only 10s ahead of fetched_at: %v", err)
+		}
+	})
 }

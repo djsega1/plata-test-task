@@ -295,6 +295,28 @@ func TestGetCurrencyRate_MalformedErrorBody(t *testing.T) {
 	}
 }
 
+// errorRoundTripper simulates a network failure (DNS, dial, TLS) below the
+// http.Client, as opposed to a server responding with an error status.
+type errorRoundTripper struct{ err error }
+
+func (rt errorRoundTripper) RoundTrip(*http.Request) (*http.Response, error) { return nil, rt.err }
+
+func TestGetCurrencyRate_TransportErrorIsClassifiedRetryable(t *testing.T) {
+	client := &http.Client{Transport: errorRoundTripper{err: errors.New("dial tcp: connection refused")}}
+	provider := exchangeratedev.NewExchangerateDevProvider(exchangeratedev.DefaultBaseURL, "", client, 5*time.Minute)
+	pair := testPair(t, quotes.CodeEUR, quotes.CodeMXN)
+
+	_, err := provider.GetCurrencyRate(context.Background(), pair)
+	rateErr := mustRateError(t, err)
+
+	if rateErr.Code() != quotes.ProviderUnavailableError {
+		t.Errorf("Code() = %v, want %v", rateErr.Code(), quotes.ProviderUnavailableError)
+	}
+	if !rateErr.Retryable() {
+		t.Errorf("Retryable() = false, want true: a network failure must be retried, not silently stall the update")
+	}
+}
+
 func TestGetCurrencyRate_ContextCancelled(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"result":"success","rate":1}`))

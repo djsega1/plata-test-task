@@ -75,6 +75,11 @@ tasks:
     cmds:
       - docker compose down
 
+  docker:psql:
+    desc: Enter psql shell
+    cmds:
+      - docker compose exec -it db psql -U quotes
+
   docker:logs:
     desc: Follow the app container's logs
     cmds:

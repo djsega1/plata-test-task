@@ -1,8 +1,6 @@
-// Package httpclient builds an http.Client with an explicit Transport
-// instead of the zero-value client's implicit fallback to
-// http.DefaultTransport. Deliberately dumb, like pkg/clock: it takes
-// numbers and returns a client, owning no defaults or config parsing of
-// its own — a caller (cmd/server) decides the numbers.
+// Package httpclient builds an http.Client with an explicit Transport.
+// Takes numbers, returns a client — no defaults or config parsing of its
+// own; the caller decides the numbers.
 package httpclient
 
 import (
@@ -10,10 +8,9 @@ import (
 	"time"
 )
 
-// New builds a client whose Transport reuses idle connections to the same
-// host instead of a fresh TCP+TLS handshake per call: the zero-value
-// Transport's MaxIdleConnsPerHost defaults to 2, too low for a caller that
-// fetches several resources from one host concurrently.
+// New builds a client whose Transport reuses idle connections per host
+// (the zero-value Transport's MaxIdleConnsPerHost default of 2 is too low
+// for concurrent calls to one host).
 func New(timeout time.Duration, maxIdleConnsPerHost int, idleConnTimeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout: timeout,

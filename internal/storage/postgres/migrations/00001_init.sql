@@ -21,7 +21,6 @@ CREATE TABLE quote_updates (
     base            CHAR(3)     NOT NULL,
     quote           CHAR(3)     NOT NULL,
     status          TEXT        NOT NULL,
-    source          TEXT        NOT NULL DEFAULT 'api',
     idempotency_key TEXT,
     attempts        INT         NOT NULL DEFAULT 0,
     next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),

@@ -56,9 +56,8 @@ Dependencies point inwards: `api/http` → `quotes` (domain and use cases) → p
 cmd/server/main.go                 — wiring: config, adapters, http.Server, dispatcher goroutine,
                                       graceful shutdown
 cmd/server/provider.go             — factory: cfg.Provider -> RateProvider adapter
-cmd/throughput/main.go             — standalone POST load generator for scripts/throughput.sh
-                                      (docs/design.md §8); stdlib only, not part of the running
-                                      service
+cmd/throughput/main.go             — standalone POST load generator for scripts/throughput.sh;
+                                      stdlib only, not part of the running service
 
 internal/
   domain/
@@ -103,83 +102,68 @@ pkg/
 ```
 
 **Ports are declared by the consumer.** `Repository`, `RateProvider` and `Clock` live in
-`internal/usecase/quotes` — that package calls them, so it declares them, not `internal/domain/quotes`.
-Domain stays free of ports entirely: it holds value objects and invariants, nothing that talks to a
-database or an upstream. Adapters (`storage/postgres`, `storage/memory`, `provider/exchangeratedev`,
-`provider/fake`) implement those interfaces structurally from the outside — they import
-`internal/domain/quotes` for the shared value types their methods take and return, and optionally
-`internal/usecase/quotes` for a compile-time assertion (`var _ quotes.RateProvider = (*Adapter)(nil)`),
-but nothing in `domain` or `usecase` ever imports an adapter package. There is no `mocks/` package —
-test doubles are hand-written next to the test that uses them. Keep it that way: an interface
-declared at its implementation grows to serve every caller, and then every test has to satisfy
-methods it does not care about.
+`internal/usecase/quotes`, not `internal/domain/quotes` — the use-case package calls them, so it
+declares them. Domain stays free of ports entirely: value objects and invariants only, nothing that
+talks to a database or an upstream. Adapters (`storage/postgres`, `storage/memory`,
+`provider/exchangeratedev`, `provider/fake`) implement those interfaces structurally from the
+outside; nothing in `domain` or `usecase` ever imports an adapter package. No `mocks/` package — test
+doubles are hand-written next to the test that uses them, so no test has to satisfy methods it
+doesn't care about.
 
-**Two packages are both named `quotes`** (`domain/quotes`, `usecase/quotes`) — that is the cost of
-splitting domain from use cases explicitly. Anywhere both are imported together, alias one
-(`domainquotes ".../domain/quotes"` is the usual choice, since the use-case package is normally the
-one already qualified by its role).
+**Two packages are both named `quotes`** (`domain/quotes`, `usecase/quotes`) — the cost of splitting
+domain from use cases explicitly. Where both are imported together, alias one
+(`domainquotes ".../domain/quotes"` is the usual choice).
 
-**One pair per upstream call.** The provider port is
-`RateProvider.GetCurrencyRate(ctx, pair) (ProviderQuote, error)` against
-`exchangerate.dev /v1/rate/{base}-{quote}`. `ProviderQuote` is deliberately not the domain
-`CurrencyRate` — it carries only what an adapter itself knows (`Value`, `Derived`, `Quality`,
-`QuotedAt`), skipping `NewCurrencyRate`'s invariant check on purpose, since a raw upstream value
-isn't safe to persist yet; the worker builds the real `CurrencyRate` once it has this plus
-`Provider`/`Indicative`/`StaleAfter`. The provider also offers `/v1/latest`, which returns
-every currency in one call — deliberately not used: it would collapse six pairs into one request and
-leave the background machinery (worker pool, per-pair single-flight, rate limiting) doing nothing,
-and background processing is the point of this assignment. See §2 of the design doc.
+**One pair per upstream call.** `RateProvider.GetCurrencyRate(ctx, pair) (ProviderQuote, error)`
+against `exchangerate.dev /v1/rate/{base}-{quote}`. `ProviderQuote` is deliberately not the domain
+`CurrencyRate` — it carries only what an adapter knows, skipping `NewCurrencyRate`'s invariant check
+since a raw upstream value isn't safe to persist yet; the worker builds the real `CurrencyRate` once
+it also has `Provider`/`Indicative`/`StaleAfter`. `/v1/latest` (every currency in one call) is
+deliberately not used: it would collapse six pairs into one request and leave the background
+machinery (worker pool, single-flight, rate limiting) doing nothing — background processing is the
+point of this assignment.
 
-**The queue is a table, not a channel.** `quote_updates` is both the record of an update request and
-the job queue. Workers claim batches with `FOR UPDATE SKIP LOCKED`, so several replicas are safe.
-Three independent things wake a worker: a non-blocking nudge from the HTTP handler (latency), a
-ticker (the only mechanism that picks up backoff-deferred work and work created by another replica),
-and a reaper that returns rows stuck in `in_progress` past the visibility timeout. Delivery is
-at-least-once by design — reading a rate has no side effects.
+**The queue is a table, not a channel.** `quote_updates` is both the update request record and the
+job queue. Workers claim batches with `FOR UPDATE SKIP LOCKED`, safe across replicas. Three things
+wake a worker: a non-blocking nudge from the HTTP handler, a ticker (picks up backoff-deferred work
+and work from another replica), and a reaper reclaiming rows stuck past the visibility timeout.
+Delivery is at-least-once — reading a rate has no side effects.
 
-**Claim, work and complete are three separate transactions.** They cannot be merged into one
-statement: a CTE's updates are invisible to the rest of the same statement, so an outer `UPDATE`
-that tries to close rows the CTE just claimed silently does nothing and leaves everything in
-`in_progress`. This was observed, not theorised. Each transaction is opened and committed inside a
-single `Repository` method (`ClaimBatch`, `CompleteSuccess`, `CompleteFailure`) — no `Tx` handle
-crosses the port boundary. The reaper is not its own method: `ClaimBatch`'s `WHERE` already covers
-rows stuck in `in_progress` past a visibility cutoff, alongside pending ones, so a reaper pass is
-just another call to the same claim. "Work" (the provider call) happens between two of these calls,
-holding no transaction open: a DB transaction should not sit open for the duration of an upstream
-HTTP call.
+**Claim, work and complete are three separate transactions.** They can't merge into one statement: a
+CTE's updates are invisible to the rest of the same statement, so an outer `UPDATE` closing rows the
+CTE just claimed silently does nothing. Each transaction is opened and committed inside a single
+`Repository` method (`ClaimBatch`, `CompleteSuccess`, `CompleteFailure`) — no `Tx` crosses the port
+boundary. The reaper isn't its own method: `ClaimBatch`'s `WHERE` already covers stuck `in_progress`
+rows alongside pending ones. "Work" (the provider call) happens between two of these calls, holding
+no transaction open.
 
-**Single-flight per pair is a correctness requirement, not an optimisation.** Eight workers can
-claim eight tasks for the same pair, all see a stale quote and all call the upstream. Requests for
-*different* pairs must still go out in parallel — that is what the pool is for. Every update keeps
-its own status and its own `quote_id` regardless.
+**Single-flight per pair is a correctness requirement, not an optimisation.** Eight workers can claim
+eight tasks for the same pair, all see a stale quote, all call the upstream. Different pairs still go
+out in parallel — that's what the pool is for.
 
-The single-flight key wraps the whole reuse-or-fetch decision, not just the upstream call: a
-`GetLatestQuote` read followed by a fetch, both inside one `singleflight.Do`. Wrapping only the
-fetch leaves a window — a caller that reads a stale quote just before another caller's fetch lands
-would join no in-flight call and fetch again on its own, right after a fetch that already covered
-it. Re-reading freshness inside the same critical section closes that window: whichever caller
-becomes the new leader sees the other one's write first.
+The single-flight key wraps the whole reuse-or-fetch decision, not just the upstream call — a
+`GetLatestQuote` read plus fetch, both inside one `singleflight.Do`. Wrapping only the fetch would
+leave a window: a caller reading a stale quote just before another's fetch lands would join no
+in-flight call and fetch again on its own. Re-reading freshness inside the same critical section
+closes it.
 
-**Two clocks, never one.** `quoted_at` is the upstream's `data_updated_at` — when the price became
-current; `fetched_at` is when it was read. The assignment's "время обновления" is the first one, and
-"latest" is ordered by `quoted_at DESC, id DESC`: the upstream can return a price older than one
-already stored, and ordering by `fetched_at` would then return the staler row.
+**Two clocks, never one.** `quoted_at` is the upstream's `data_updated_at` (when the price became
+current); `fetched_at` is when it was read. "Latest" orders by `quoted_at DESC, id DESC`: the
+upstream can return a price older than one already stored, and ordering by `fetched_at` would then
+return the staler row.
 
-**`stale_after` is a cache policy, not a provider guarantee.** The upstream reports `source`
-(`live`, `ecb_daily`, `fred_daily`) but promises no lifetime, and a different upstream could use an
-entirely different quality vocabulary — so each adapter's `StaleAfter(quality, quotedAt)` derives its
-own freshness window, not a shared function keyed on a fixed set of strings. `exchangerate.dev`'s:
-~60s for `live`, next publication (~24h) for daily sources, a conservative `QUOTE_TTL` from config for
-anything else.
+**`stale_after` is a cache policy, not a provider guarantee.** `source` reports origin, not a
+lifetime, and a different upstream could use a different quality vocabulary — so each adapter's
+`StaleAfter(quality, quotedAt)` derives its own window. `exchangerate.dev`'s: ~60s for `live`, next
+publication (~24h) for daily sources, `QUOTE_TTL` from config otherwise.
 
-**Money is `decimal`, never `float64`.** Rates are decoded from JSON as `json.Number` and parsed
-into `shopspring/decimal`; the journal stores `NUMERIC(24,10)`; the API serialises prices as strings
-so a JavaScript client cannot lose precision.
+**Money is `decimal`, never `float64`.** JSON decodes as `json.Number` into `shopspring/decimal`; the
+journal stores `NUMERIC(24,10)`; the API serialises prices as strings.
 
-**Idempotency works on two levels.** An optional `Idempotency-Key` header, scoped to
-`POST /quotes/updates`, protects against one client retrying (unique partial index; a replay returns
-the original update). Separately, a worker reuses a quote that is still inside `stale_after` instead
-of calling the upstream. Neither replaces the other.
+**Idempotency works on two levels.** An `Idempotency-Key` header, scoped to
+`POST /quotes/updates`, protects against a client retrying (unique partial index; a replay returns
+the original update). Separately, a worker reuses a quote still inside `stale_after` instead of
+calling the upstream. Neither replaces the other.
 
 ## Conventions
 
@@ -197,16 +181,13 @@ of calling the upstream. Neither replaces the other.
   project's Go standard library, not a fetched dependency). A new dependency needs a reason that
   survives the question "what does this cost in production?".
 - **IDs are UUIDv7, never v4.** Generate with `uuid.NewV7()` — `uuid.New()`/`uuid.NewV4()` are
-  disallowed everywhere in this codebase. v7 embeds a timestamp, so `quote_updates` primary-key
-  inserts stay ordered instead of scattering across the B-tree the way random v4 would. Requires
-  PostgreSQL 18+.
+  disallowed everywhere. v7 embeds a timestamp, so primary-key inserts stay ordered instead of
+  scattering across the B-tree like random v4. Requires PostgreSQL 18+.
 - **No business logic in the database.** Migrations declare columns, types, `PRIMARY KEY`,
-  `FOREIGN KEY`, `UNIQUE` and `NOT NULL` only — those are structural/concurrency guarantees the
-  application cannot otherwise get atomically (a unique partial index is what makes a concurrent
-  idempotent insert safe; the app layer alone would have a check-then-insert race). Never a `CHECK`
-  that encodes domain vocabulary or a state machine — valid `quality`/`status` values and the
-  `rate > 0` invariant are validated by Go types and constructors in `internal/domain/quotes`
-  before a row is ever written, not duplicated as SQL.
+  `FOREIGN KEY`, `UNIQUE`, `NOT NULL` only — structural/concurrency guarantees the app can't get
+  atomically otherwise (a unique partial index is what makes a concurrent idempotent insert safe).
+  No `CHECK` encoding domain vocabulary or a state machine: `quality`/`status`/`rate > 0` are
+  validated by Go types and constructors in `internal/domain/quotes` before a row is ever written.
 
 ## Working agreement
 

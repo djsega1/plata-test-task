@@ -39,15 +39,10 @@ type CurrencyRateUpdateRequest struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time
 
-	// Attempts counts every claim, reaper reclaims included, for the
-	// request's whole lifetime — it never resets. ErrorCode/ErrorMessage
-	// report the most recent failed attempt: every Repository.CompleteFailure
-	// call sets both, whether the request lands on StatusFailed or goes back
-	// to StatusPending for a retry — so they can be non-empty on a Pending
-	// row too, mid-backoff after a retryable failure. Only
-	// Repository.CompleteSuccess clears them. They're the same strings a
-	// CompleteFailure call was given — not domainquotes.CurrencyRateErrorCode
-	// — since the queue only ever stores and returns them as plain text.
+	// Attempts counts every claim (including reaper reclaims) for the
+	// request's lifetime; it never resets. ErrorCode/ErrorMessage report the
+	// most recent failure and can be non-empty on a Pending row mid-backoff;
+	// only CompleteSuccess clears them.
 	Attempts     int
 	ErrorCode    string
 	ErrorMessage string

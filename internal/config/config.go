@@ -27,8 +27,7 @@ func (p Provider) valid() bool {
 }
 
 // Storage selects which Repository adapter cmd/server wires up. Only
-// postgres exists so far; memory is for use-case tests (CLAUDE.md), not
-// yet a runtime option.
+// postgres exists so far; memory is for use-case tests, not a runtime option.
 type Storage string
 
 const StoragePostgres Storage = "postgres"
@@ -49,6 +48,16 @@ type Config struct {
 	Provider          Provider
 	Storage           Storage
 	DatabaseURL       string
+	// PostgresMaxConns overrides pgxpool's own default (max(4, NumCPU)).
+	// 0 leaves pgxpool's default in place.
+	PostgresMaxConns int
+	// PostgresMaxConnLifetime bounds how long a pooled connection lives
+	// before retirement, even if healthy — avoids a stale route after a
+	// failover or DNS change. 0 leaves pgxpool's default (1h).
+	PostgresMaxConnLifetime time.Duration
+	// PostgresHealthCheckPeriod is how often pgxpool background-checks idle
+	// connections. 0 leaves pgxpool's own default (1m) in place.
+	PostgresHealthCheckPeriod time.Duration
 
 	// QuoteTTL is the StaleAfter fallback an adapter uses for any quality
 	// it doesn't otherwise recognize.
@@ -58,22 +67,29 @@ type Config struct {
 	RateLimitPerMinute int
 	RateLimitPerHour   int
 
-	// DispatchTickInterval drives cmd/server's real ticker — the only
-	// mechanism that picks up backoff-deferred work and work created by
-	// another replica. A POST's nudge covers the common case; the tick is
-	// the fallback.
+	// DispatchTickInterval drives the ticker that picks up backoff-deferred
+	// work and work from other replicas; POST nudges cover the common case.
 	DispatchTickInterval time.Duration
 	// DispatchBatchSize is ClaimBatch's limit per pass.
 	DispatchBatchSize int
 	// DispatchPoolSize bounds requests in flight at once across a batch.
 	DispatchPoolSize int
 	// DispatchVisibilityTimeout is how long a claimed row may stay
-	// in_progress before the reaper (folded into ClaimBatch) reclaims it.
-	// Must comfortably exceed a provider adapter's own HTTP timeout.
+	// in_progress before it's reclaimed. Must exceed the provider's HTTP timeout.
 	DispatchVisibilityTimeout time.Duration
 	// DispatchBaseBackoff is Worker's floor retry delay — raised to a
 	// failure's own Retry-After when that's longer, then jittered.
 	DispatchBaseBackoff time.Duration
+	// DispatchMaxBackoff caps the exponential backoff growth so late
+	// retries don't wait tens of minutes.
+	DispatchMaxBackoff time.Duration
+	// DispatchMaxAttempts caps retries before a failure is marked failed
+	// instead of requeued forever.
+	DispatchMaxAttempts int
+	// DispatchPassTimeout bounds one dispatcher pass. Claim/work/complete
+	// run on context.WithoutCancel so shutdown doesn't abort in-flight
+	// work, so this is what stops a stuck call from hanging the goroutine.
+	DispatchPassTimeout time.Duration
 
 	// ProviderHTTPTimeout bounds internal/provider/exchangeratedev's HTTP
 	// client (only used when Provider is exchangeratedev).
@@ -84,11 +100,8 @@ type Config struct {
 	ProviderHTTPMaxIdleConnsPerHost int
 	ProviderHTTPIdleConnTimeout     time.Duration
 	// FakeProviderMinDelay/MaxDelay simulate upstream latency when Provider
-	// is fake; both zero (the default) matches cmd/server's production
-	// wiring, which leaves them at zero on purpose — RateLimiter is the
-	// single source of quota truth for the real dispatcher — but a demo
-	// run can opt into some delay to make the async nature of the API
-	// visible.
+	// is fake. Zero by default; a demo run can opt into delay to make the
+	// async behavior visible.
 	FakeProviderMinDelay time.Duration
 	FakeProviderMaxDelay time.Duration
 	// FakeProviderRPMQuota, if positive, makes the fake provider enforce
@@ -116,16 +129,21 @@ const (
 	defaultDispatchPoolSize          = 8
 	defaultDispatchVisibilityTimeout = 30 * time.Second
 	defaultDispatchBaseBackoff       = 5 * time.Second
+	// defaultDispatchMaxBackoff caps the exponential growth below.
+	defaultDispatchMaxBackoff = 5 * time.Minute
+	// defaultDispatchMaxAttempts: backoff doubles each attempt up to
+	// maxBackoff, so 10 attempts is ~20 minutes before giving up.
+	defaultDispatchMaxAttempts = 10
+	// defaultDispatchPassTimeout: comfortably above one full batch's worst
+	// case (100/8 rounds * 5s timeout ~= 65s), so only a stuck call hits it.
+	defaultDispatchPassTimeout = 90 * time.Second
 
 	defaultProviderHTTPTimeout = 5 * time.Second
 	// defaultProviderHTTPMaxIdleConnsPerHost matches DispatchPoolSize's
-	// default: that many workers is the most concurrent outbound calls
-	// this service ever makes at once, so it's also the most connections
-	// to the same upstream host worth keeping idle for reuse.
+	// default: the most concurrent outbound calls this service ever makes.
 	defaultProviderHTTPMaxIdleConnsPerHost = 8
-	// defaultProviderHTTPIdleConnTimeout matches net/http's own
-	// DefaultTransport default (90s) — no evidence yet that this
-	// workload needs a different one.
+	// defaultProviderHTTPIdleConnTimeout matches net/http's DefaultTransport
+	// default (90s).
 	defaultProviderHTTPIdleConnTimeout = 90 * time.Second
 	// FakeProviderMinDelay/MaxDelay/RPMQuota default to zero (Go's zero
 	// value) — no named constant needed for "off".
@@ -153,6 +171,9 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		DispatchPoolSize:          defaultDispatchPoolSize,
 		DispatchVisibilityTimeout: defaultDispatchVisibilityTimeout,
 		DispatchBaseBackoff:       defaultDispatchBaseBackoff,
+		DispatchMaxBackoff:        defaultDispatchMaxBackoff,
+		DispatchMaxAttempts:       defaultDispatchMaxAttempts,
+		DispatchPassTimeout:       defaultDispatchPassTimeout,
 
 		ProviderHTTPTimeout:             defaultProviderHTTPTimeout,
 		ProviderHTTPMaxIdleConnsPerHost: defaultProviderHTTPMaxIdleConnsPerHost,
@@ -177,6 +198,8 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		{"DISPATCH_TICK_INTERVAL", &cfg.DispatchTickInterval},
 		{"DISPATCH_VISIBILITY_TIMEOUT", &cfg.DispatchVisibilityTimeout},
 		{"DISPATCH_BASE_BACKOFF", &cfg.DispatchBaseBackoff},
+		{"DISPATCH_PASS_TIMEOUT", &cfg.DispatchPassTimeout},
+		{"DISPATCH_MAX_BACKOFF", &cfg.DispatchMaxBackoff},
 		{"PROVIDER_HTTP_TIMEOUT", &cfg.ProviderHTTPTimeout},
 		{"PROVIDER_HTTP_IDLE_CONN_TIMEOUT", &cfg.ProviderHTTPIdleConnTimeout},
 	} {
@@ -191,6 +214,8 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 	}{
 		{"FAKE_PROVIDER_MIN_DELAY", &cfg.FakeProviderMinDelay},
 		{"FAKE_PROVIDER_MAX_DELAY", &cfg.FakeProviderMaxDelay},
+		{"POSTGRES_MAX_CONN_LIFETIME", &cfg.PostgresMaxConnLifetime},
+		{"POSTGRES_HEALTH_CHECK_PERIOD", &cfg.PostgresHealthCheckPeriod},
 	} {
 		if *d.dst, err = nonNegativeDurationEnv(getenv, d.name, *d.dst); err != nil {
 			return Config{}, err
@@ -205,6 +230,7 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		{"RATE_LIMIT_PER_HOUR", &cfg.RateLimitPerHour},
 		{"DISPATCH_BATCH_SIZE", &cfg.DispatchBatchSize},
 		{"DISPATCH_POOL_SIZE", &cfg.DispatchPoolSize},
+		{"DISPATCH_MAX_ATTEMPTS", &cfg.DispatchMaxAttempts},
 		{"PROVIDER_HTTP_MAX_IDLE_CONNS_PER_HOST", &cfg.ProviderHTTPMaxIdleConnsPerHost},
 	} {
 		if *n.dst, err = intEnv(getenv, n.name, *n.dst); err != nil {
@@ -213,6 +239,10 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 	}
 
 	if cfg.FakeProviderRPMQuota, err = nonNegativeIntEnv(getenv, "FAKE_PROVIDER_RPM_QUOTA", cfg.FakeProviderRPMQuota); err != nil {
+		return Config{}, err
+	}
+	// 0 means "leave pgxpool's default in place", not a misconfiguration.
+	if cfg.PostgresMaxConns, err = nonNegativeIntEnv(getenv, "POSTGRES_MAX_CONNS", cfg.PostgresMaxConns); err != nil {
 		return Config{}, err
 	}
 

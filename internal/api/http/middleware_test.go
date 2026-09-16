@@ -183,6 +183,46 @@ func TestCORSMiddlewareAnswersPreflightWithoutReachingHandler(t *testing.T) {
 	}
 }
 
+func TestRequestIDMiddlewareGeneratesIDWhenAbsent(t *testing.T) {
+	var gotID string
+	handler := requestIDMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotID = requestIDFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if gotID == "" {
+		t.Fatal("requestIDFromContext returned empty, want a generated id")
+	}
+	if got := rec.Header().Get(requestIDHeader); got != gotID {
+		t.Errorf("%s header = %q, want it to match the context id %q", requestIDHeader, got, gotID)
+	}
+}
+
+func TestRequestIDMiddlewareTrustsInboundHeader(t *testing.T) {
+	const inbound = "upstream-assigned-id"
+	var gotID string
+	handler := requestIDMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotID = requestIDFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+	req.Header.Set(requestIDHeader, inbound)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if gotID != inbound {
+		t.Errorf("context id = %q, want the inbound id %q trusted as-is", gotID, inbound)
+	}
+	if got := rec.Header().Get(requestIDHeader); got != inbound {
+		t.Errorf("%s header = %q, want %q echoed back", requestIDHeader, got, inbound)
+	}
+}
+
 func TestRecoverMiddlewareNoPanic(t *testing.T) {
 	var buf bytes.Buffer
 	logger := bufferLogger(&buf)

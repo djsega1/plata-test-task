@@ -189,6 +189,38 @@ func TestPostQuotesUpdates_IdempotencyConflict(t *testing.T) {
 	assert.Equal(t, "idempotency_conflict", decodeBody[errorEnvelope](t, rec2).Error.Code)
 }
 
+// TestPostQuotesUpdates_LogsRequestIDWithUpdateID covers the one log line
+// design.md's request_id tracing relies on: request_id and update_id
+// logged together, so a request_id from an access log or client report can
+// be traced forward into the worker's update_id-keyed logs.
+func TestPostQuotesUpdates_LogsRequestIDWithUpdateID(t *testing.T) {
+	var buf bytes.Buffer
+	logger := bufferLogger(&buf)
+	repo := memory.NewRepository()
+	fc := clock.NewFakeClock(testNow)
+	router := NewRouter(logger, alwaysReady, repo, fc, nil)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/quotes/updates",
+		bytes.NewReader(mustJSON(t, map[string]string{"pair": "EUR/MXN"})))
+	req.Header.Set(requestIDHeader, "test-request-id")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	created := decodeBody[createUpdateResponse](t, rec)
+
+	var pivot map[string]any
+	for _, line := range decodeLogLines(t, &buf) {
+		if line["msg"] == "update requested" {
+			pivot = line
+			break
+		}
+	}
+	require.NotNil(t, pivot, "expected an \"update requested\" log line")
+	assert.Equal(t, "test-request-id", pivot["request_id"])
+	assert.Equal(t, created.UpdateID, pivot["update_id"])
+}
+
 func mustJSON(t *testing.T, v any) []byte {
 	t.Helper()
 	b, err := json.Marshal(v)
@@ -351,8 +383,8 @@ func TestEndToEnd_PostPollLatest(t *testing.T) {
 	router := NewRouter(discardLogger(), alwaysReady, repo, fc, nudge)
 
 	provider := fake.NewFakeRateProvider(fc, 0, 0, 0, time.Minute)
-	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second)
-	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), 10, 4, time.Hour)
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second, time.Minute, 5)
+	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), 10, 4, time.Hour, time.Minute)
 
 	postRec := doJSON(t, router, http.MethodPost, "/api/v1/quotes/updates", map[string]string{"pair": "EUR/MXN"})
 	require.Equal(t, http.StatusAccepted, postRec.Code)

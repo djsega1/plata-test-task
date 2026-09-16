@@ -4,7 +4,6 @@ package memory
 
 import (
 	"context"
-	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -113,10 +112,8 @@ func (r *Repository) ClaimBatch(_ context.Context, limit int, now, visibleSince 
 		candidates = candidates[:limit]
 	}
 
-	// Compute every transition before mutating anything: storage/postgres
-	// claims in one UPDATE statement, which can't apply to some rows and
-	// fail on others, so this can't either. TransitionTo has a value
-	// receiver, so this loop has no side effects to undo if it returns early.
+	// Compute every transition before mutating anything, mirroring
+	// storage/postgres's single UPDATE (all rows or none).
 	claimed := make([]domainquotes.CurrencyRateUpdateRequest, len(candidates))
 	for i, rec := range candidates {
 		var next domainquotes.CurrencyRateUpdateRequest
@@ -145,22 +142,35 @@ func (r *Repository) ClaimBatch(_ context.Context, limit int, now, visibleSince 
 	return claimed, nil
 }
 
+// transitionRecord looks up id and validates the move to next through
+// CurrencyRateUpdateRequest.TransitionTo — the domain decides legality, not
+// a caller-side status check, mirroring storage/postgres's
+// transitionRequest. Caller must hold r.mu.
+func (r *Repository) transitionRecord(
+	id uuid.UUID, next domainquotes.CurrencyRateUpdateStatus, now time.Time,
+) (*record, domainquotes.CurrencyRateUpdateRequest, error) {
+	rec, ok := r.records[id]
+	if !ok {
+		return nil, domainquotes.CurrencyRateUpdateRequest{}, quotes.ErrNotFound
+	}
+	updated, err := rec.req.TransitionTo(next, now)
+	if err != nil {
+		return nil, domainquotes.CurrencyRateUpdateRequest{}, err
+	}
+	return rec, updated, nil
+}
+
 func (r *Repository) CompleteSuccess(
 	_ context.Context, id uuid.UUID, pair domainquotes.CurrencyPair, rate domainquotes.CurrencyRate, now time.Time,
 ) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	rec, ok := r.records[id]
-	if !ok || rec.req.Status != domainquotes.StatusInProgress {
-		return fmt.Errorf("memory: complete success: %s not in_progress", id)
-	}
-
-	// Validate before the journal write below: findOrCreateQuote mutates
-	// r.quotes unconditionally, and storage/postgres's version of this write
-	// sits in a transaction that rolls back on failure — nothing may be
-	// written here either until the transition is known to succeed.
-	next, err := rec.req.TransitionTo(domainquotes.StatusSucceeded, now)
+	// Validate before touching r.quotes: findOrCreateQuote mutates it
+	// unconditionally, and storage/postgres's equivalent write sits in a
+	// transaction that rolls back on failure — nothing may be written here
+	// either until the transition is known to succeed.
+	rec, next, err := r.transitionRecord(id, domainquotes.StatusSucceeded, now)
 	if err != nil {
 		return err
 	}
@@ -169,7 +179,6 @@ func (r *Repository) CompleteSuccess(
 	// once it's read back.
 	next.ErrorCode = ""
 	next.ErrorMessage = ""
-
 	rec.quoteID = r.findOrCreateQuote(pair, rate)
 	rec.req = next
 	return nil
@@ -188,22 +197,35 @@ func (r *Repository) findOrCreateQuote(pair domainquotes.CurrencyPair, rate doma
 	return r.nextQuoteID
 }
 
+// CompleteSuccessReuse closes id by pointing it at an existing quotes
+// record (quoteID) instead of inserting a new one — the reuse counterpart
+// to CompleteSuccess.
+func (r *Repository) CompleteSuccessReuse(_ context.Context, id uuid.UUID, quoteID int64, now time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	rec, next, err := r.transitionRecord(id, domainquotes.StatusSucceeded, now)
+	if err != nil {
+		return err
+	}
+	next.ErrorCode = ""
+	next.ErrorMessage = ""
+	rec.quoteID = quoteID
+	rec.req = next
+	return nil
+}
+
 func (r *Repository) CompleteFailure(
 	_ context.Context, id uuid.UUID, errCode, errMessage string, retryable bool, nextAttemptAt, now time.Time,
 ) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	rec, ok := r.records[id]
-	if !ok || rec.req.Status != domainquotes.StatusInProgress {
-		return fmt.Errorf("memory: complete failure: %s not in_progress", id)
-	}
-
 	nextStatus := domainquotes.StatusFailed
 	if retryable {
 		nextStatus = domainquotes.StatusPending
 	}
-	next, err := rec.req.TransitionTo(nextStatus, now)
+	rec, next, err := r.transitionRecord(id, nextStatus, now)
 	if err != nil {
 		return err
 	}
@@ -232,8 +254,8 @@ func (r *Repository) GetUpdateByID(_ context.Context, id uuid.UUID) (domainquote
 }
 
 // GetLatestQuote orders by quoted_at then id, same tie-break as the SQL
-// index.
-func (r *Repository) GetLatestQuote(_ context.Context, pair domainquotes.CurrencyPair) (domainquotes.CurrencyRate, error) {
+// index, and also returns that record's own id.
+func (r *Repository) GetLatestQuote(_ context.Context, pair domainquotes.CurrencyPair) (domainquotes.CurrencyRate, int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -253,7 +275,7 @@ func (r *Repository) GetLatestQuote(_ context.Context, pair domainquotes.Currenc
 		}
 	}
 	if !found {
-		return domainquotes.CurrencyRate{}, quotes.ErrNotFound
+		return domainquotes.CurrencyRate{}, 0, quotes.ErrNotFound
 	}
-	return best, nil
+	return best, bestID, nil
 }

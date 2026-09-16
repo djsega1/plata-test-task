@@ -38,7 +38,9 @@ func run() int {
 		return 1
 	}
 
-	pool, err := postgres.NewPool(context.Background(), cfg.DatabaseURL)
+	pool, err := postgres.NewPool(
+		context.Background(), cfg.DatabaseURL, cfg.PostgresMaxConns, cfg.PostgresMaxConnLifetime, cfg.PostgresHealthCheckPeriod,
+	)
 	if err != nil {
 		logger.Error("connect to database", "error", err)
 		return 1
@@ -54,16 +56,16 @@ func run() int {
 	repo := postgres.NewRepository(pool)
 	sysClock := clock.NewSystemClock()
 	limiter := quotes.NewRateLimiter(cfg.RateLimitPerMinute, cfg.RateLimitPerHour)
-	worker := quotes.NewWorker(repo, provider, sysClock, limiter, logger, cfg.DispatchBaseBackoff)
+	worker := quotes.NewWorker(
+		repo, provider, sysClock, limiter, logger, cfg.DispatchBaseBackoff, cfg.DispatchMaxBackoff, cfg.DispatchMaxAttempts,
+	)
 	dispatcher := quotes.NewDispatcher(
-		repo, sysClock, worker, logger, cfg.DispatchBatchSize, cfg.DispatchPoolSize, cfg.DispatchVisibilityTimeout,
+		repo, sysClock, worker, logger, cfg.DispatchBatchSize, cfg.DispatchPoolSize,
+		cfg.DispatchVisibilityTimeout, cfg.DispatchPassTimeout,
 	)
 
-	// nudge is buffered by one: a POST that arrives while a claim-and-dispatch
-	// pass is already running still leaves a pending signal for the next
-	// pass, without blocking the HTTP response on it (see
-	// api/http.postQuotesUpdatesHandler). Extra nudges beyond that just fall
-	// through to the next tick, which is exactly the tick's job.
+	// Buffered by one: a POST during an in-progress pass still leaves a
+	// pending signal for the next one, without blocking the HTTP response.
 	nudge := make(chan struct{}, 1)
 	ticker := time.NewTicker(cfg.DispatchTickInterval)
 	defer ticker.Stop()
@@ -74,14 +76,9 @@ func run() int {
 		defer close(dispatchDone)
 		dispatcher.Run(dispatchCtx, nudge, ticker.C)
 	}()
-	// stopDispatch cancels dispatchCtx, which only stops Run from starting
-	// another pass — Run itself detaches ClaimAndDispatch from that
-	// cancellation (see usecase/quotes/dispatcher.go), so a pass already in
-	// flight keeps running and Run only returns once it has completed.
-	// Waiting on dispatchDone here, rather than just calling stopDispatch,
-	// is what actually lets that in-flight pass finish instead of abandoning
-	// claimed rows mid-flight. Deferred once here so every return path below
-	// waits for it, instead of each one calling it by hand.
+	// stopDispatch only stops Run from starting another pass; a pass already
+	// in flight keeps running, so waiting on dispatchDone here lets it
+	// finish instead of abandoning claimed rows mid-flight.
 	defer func() {
 		stopDispatch()
 		<-dispatchDone
