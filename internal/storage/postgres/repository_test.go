@@ -164,7 +164,7 @@ func TestClaimBatch_ReclaimsStuckInProgress(t *testing.T) {
 
 	var attempts int
 	require.NoError(t, pool.QueryRow(ctx, "SELECT attempts FROM quote_updates WHERE id = $1", req.ID).Scan(&attempts))
-	assert.Equal(t, 2, attempts, "one attempt per claim: initial + reclaim")
+	assert.Equal(t, 1, attempts, "a reaper reclaim isn't a real retry against the upstream, so it must not spend attempts budget")
 }
 
 // TestClaimBatch_MergesPendingAndStuckByPriority exercises ClaimBatch's

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 	"uuid"
@@ -89,6 +90,7 @@ type wireQuote struct {
 	Quality    string     `json:"quality"`
 	Derived    bool       `json:"derived"`
 	Indicative bool       `json:"indicative"`
+	Cached     *bool      `json:"cached"`
 	Attempts   int        `json:"attempts"`
 	Error      *errorBody `json:"error"`
 }
@@ -169,6 +171,19 @@ func TestPostQuotesUpdates_IdempotencyReplay(t *testing.T) {
 	assert.Equal(t, "true", rec2.Header().Get("Idempotency-Replayed"))
 	second := decodeBody[createUpdateResponse](t, rec2)
 	assert.Equal(t, first.UpdateID, second.UpdateID)
+}
+
+func TestPostQuotesUpdates_IdempotencyKeyTooLong(t *testing.T) {
+	router, _, _ := newBusinessRouter(t)
+
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/quotes/updates",
+		bytes.NewReader(mustJSON(t, map[string]string{"pair": "EUR/MXN"})))
+	r.Header.Set("Idempotency-Key", strings.Repeat("a", 256))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, r)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, "invalid_request", decodeBody[errorEnvelope](t, rec).Error.Code)
 }
 
 func TestPostQuotesUpdates_IdempotencyConflict(t *testing.T) {
@@ -264,6 +279,38 @@ func TestGetQuotesUpdate_Succeeded(t *testing.T) {
 	assert.Equal(t, "succeeded", body.Status)
 	assert.Equal(t, "18.4321000000", body.Price)
 	assert.Equal(t, "exchangerate.dev", body.Provider)
+	require.NotNil(t, body.Cached)
+	assert.False(t, *body.Cached, "CompleteSuccess is a real provider fetch, not a cache hit")
+}
+
+// TestGetQuotesUpdate_SucceededReuse covers the other half of "cached": a
+// request resolved via CompleteSuccessReuse (a still-fresh quote, no
+// provider call) must report cached:true so a client can tell it apart from
+// a request that actually triggered a refresh.
+func TestGetQuotesUpdate_SucceededReuse(t *testing.T) {
+	router, repo, fc := newBusinessRouter(t)
+	pair := testPair(t)
+
+	first := domainquotes.NewCurrencyRateUpdateRequest(pair, fc.Now())
+	require.NoError(t, repo.CreateUpdateRequest(t.Context(), first, ""))
+	second := domainquotes.NewCurrencyRateUpdateRequest(pair, fc.Now())
+	require.NoError(t, repo.CreateUpdateRequest(t.Context(), second, ""))
+	_, err := repo.ClaimBatch(t.Context(), 10, fc.Now(), fc.Now().Add(-time.Hour))
+	require.NoError(t, err)
+
+	rate := testRate(t, fc.Now())
+	require.NoError(t, repo.CompleteSuccess(t.Context(), first.ID, pair, rate, fc.Now()))
+	_, quoteID, err := repo.GetLatestQuote(t.Context(), pair)
+	require.NoError(t, err)
+	require.NoError(t, repo.CompleteSuccessReuse(t.Context(), second.ID, quoteID, fc.Now()))
+
+	rec := doJSON(t, router, http.MethodGet, "/api/v1/quotes/updates/"+second.ID.String(), nil)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	body := decodeBody[wireQuote](t, rec)
+	assert.Equal(t, "succeeded", body.Status)
+	require.NotNil(t, body.Cached)
+	assert.True(t, *body.Cached)
 }
 
 func TestGetQuotesUpdate_Failed(t *testing.T) {

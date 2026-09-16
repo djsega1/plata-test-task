@@ -35,7 +35,12 @@ func (p CurrencyPair) String() string {
 	return p.Slug("/")
 }
 
+// ParseCurrencyPair trims surrounding whitespace and upcases before
+// splitting: "eur/mxn" and " EUR/MXN " are the same pair to a client, and
+// rejecting them as unsupported (rather than malformed) would misreport a
+// case mismatch as an allow-list violation.
 func ParseCurrencyPair(s, sep string) (CurrencyPair, error) {
+	s = strings.ToUpper(strings.TrimSpace(s))
 	codes := strings.Split(s, sep)
 
 	if len(codes) != 2 || codes[0] == "" || codes[1] == "" {

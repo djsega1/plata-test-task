@@ -7,25 +7,45 @@ import (
 
 // RateLimiter bounds the dispatcher's own outbound provider calls to two
 // independent sliding windows. Self-counted: it tracks its own call history
-// rather than trusting a provider's response headers.
+// rather than trusting a provider's response headers, except for CoolDown
+// below.
 type RateLimiter struct {
 	perMinute int // 0 means no limit
 	perHour   int // 0 means no limit
 
-	mu    sync.Mutex
-	calls []time.Time // ascending, pruned to the last hour
+	mu           sync.Mutex
+	calls        []time.Time // ascending, pruned to the last hour
+	blockedUntil time.Time   // zero value: no active cooldown
 }
 
 func NewRateLimiter(perMinute, perHour int) *RateLimiter {
 	return &RateLimiter{perMinute: perMinute, perHour: perHour}
 }
 
+// CoolDown blocks every future Allow (regardless of the sliding windows'
+// own room) until until. Worker calls this when the upstream itself signals
+// a Retry-After: that budget is shared across every pair this process
+// fetches, not just the one call that got the 429, so honoring it only as
+// that one row's own backoff would let every other pair keep hammering a
+// provider that just asked everyone to stop.
+func (r *RateLimiter) CoolDown(until time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if until.After(r.blockedUntil) {
+		r.blockedUntil = until
+	}
+}
+
 // Allow reports whether a call is permitted at now, and records it if so.
 // When it isn't, retryAfter is how long until the window that's currently
-// full has room again.
+// full (or an active CoolDown) has room again.
 func (r *RateLimiter) Allow(now time.Time) (ok bool, retryAfter time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if now.Before(r.blockedUntil) {
+		return false, r.blockedUntil.Sub(now)
+	}
 
 	hourCutoff := now.Add(-time.Hour)
 	minuteCutoff := now.Add(-time.Minute)

@@ -176,16 +176,16 @@ func TestWorker_Process_PermanentFailureFails(t *testing.T) {
 
 // TestWorker_Process_UnclassifiedErrorLeavesRowInProgressForTheReaper covers
 // Worker.fail's documented behaviour for an error that isn't a
-// domainquotes.CurrencyRateError: it isn't this service's to classify, so
-// it's returned as-is rather than recorded via CompleteFailure — the row
-// stays in_progress and the reaper (ClaimBatch's own WHERE) reclaims it
-// later, rather than silently landing in an unrecorded, un-backed-off
-// state. This is exactly the gap a provider adapter that fails to classify
-// a transport error (see exchangeratedev's ProviderUnavailableError
-// wrapping) would otherwise fall into: without this path returning the
-// error, a caller (Dispatcher) would have nothing to log and no way to
-// tell a genuine bug in an adapter's error handling from a normal
-// classified failure.
+// domainquotes.CurrencyRateError, while there's still retry budget left: it
+// isn't this service's to classify, so it's returned as-is rather than
+// recorded via CompleteFailure — the row stays in_progress and the reaper
+// (ClaimBatch's own WHERE) reclaims it later, rather than silently landing
+// in an unrecorded, un-backed-off state. This is exactly the gap a provider
+// adapter that fails to classify a transport error (see exchangeratedev's
+// ProviderUnavailableError wrapping) would otherwise fall into: without this
+// path returning the error, a caller (Dispatcher) would have nothing to log
+// and no way to tell a genuine bug in an adapter's error handling from a
+// normal classified failure.
 func TestWorker_Process_UnclassifiedErrorLeavesRowInProgressForTheReaper(t *testing.T) {
 	repo := memory.NewRepository()
 	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
@@ -204,6 +204,33 @@ func TestWorker_Process_UnclassifiedErrorLeavesRowInProgressForTheReaper(t *test
 	require.NoError(t, getErr)
 	assert.Equal(t, domainquotes.StatusInProgress, gotReq.Status,
 		"CompleteFailure must not be called for an error Worker can't classify — the reaper reclaims it instead")
+}
+
+// TestWorker_Process_UnclassifiedErrorFailsPermanentlyOnceAttemptsExhausted
+// covers the other half of that same budget: without it, a bug that always
+// fails before a row reaches CompleteFailure (e.g. a Repository outage)
+// would cycle the row through the reaper forever — never recorded, never
+// surfaced to a client polling GET /quotes/updates/{id}.
+func TestWorker_Process_UnclassifiedErrorFailsPermanentlyOnceAttemptsExhausted(t *testing.T) {
+	repo := memory.NewRepository()
+	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	pair := testPair(t)
+
+	unclassified := errors.New("boom: adapter forgot to classify this")
+	provider := &countingProvider{err: unclassified}
+	const maxAttempts = 3
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second, time.Minute, maxAttempts)
+
+	req := claimOne(t, repo, pair, fc.Now())
+	req.Attempts = maxAttempts // as if the reaper had already reclaimed it up to the budget
+	err := worker.Process(t.Context(), req)
+	require.NoError(t, err, "once budget is exhausted, fail must record CompleteFailure itself, not propagate")
+
+	gotReq, _, getErr := repo.GetUpdateByID(t.Context(), req.ID)
+	require.NoError(t, getErr)
+	assert.Equal(t, domainquotes.StatusFailed, gotReq.Status)
+	assert.Equal(t, "internal_error", gotReq.ErrorCode)
+	assert.Contains(t, gotReq.ErrorMessage, unclassified.Error())
 }
 
 func TestWorker_Process_RateLimitedDefersWithoutCallingProvider(t *testing.T) {
@@ -228,6 +255,38 @@ func TestWorker_Process_RateLimitedDefersWithoutCallingProvider(t *testing.T) {
 	gotReq, _, err := repo.GetUpdateByID(t.Context(), req.ID)
 	require.NoError(t, err)
 	assert.Equal(t, domainquotes.StatusPending, gotReq.Status, "deferred, not failed")
+}
+
+// TestWorker_Process_RetryAfterCoolsDownLimiterForEveryPair covers the fix
+// for a Retry-After that used to affect only the failing row's own backoff:
+// every other pair kept spending a budget the upstream just said was empty.
+// Now a 429's Retry-After pauses the shared RateLimiter itself, so a second,
+// unrelated pair must not reach the provider either while the cooldown is
+// still in effect.
+func TestWorker_Process_RetryAfterCoolsDownLimiterForEveryPair(t *testing.T) {
+	repo := memory.NewRepository()
+	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	pair1 := testPair(t)
+	pair2, err := domainquotes.NewCurrencyPair(domainquotes.CodeEUR, domainquotes.CodeMXN)
+	require.NoError(t, err)
+
+	provider := &countingProvider{err: domainquotes.NewCurrencyRateError(
+		domainquotes.RateLimitedError, "too many requests", true, 30*time.Second, "",
+	)}
+	limiter := quotes.NewRateLimiter(100, 1000) // plenty of room in both windows
+	worker := quotes.NewWorker(repo, provider, fc, limiter, discardLogger(), time.Second, time.Minute, 5)
+
+	req1 := claimOne(t, repo, pair1, fc.Now())
+	require.NoError(t, worker.Process(t.Context(), req1))
+	require.Equal(t, 1, provider.callCount())
+
+	req2 := claimOne(t, repo, pair2, fc.Now())
+	require.NoError(t, worker.Process(t.Context(), req2))
+	assert.Equal(t, 1, provider.callCount(), "cooldown from pair1's Retry-After must block pair2 too")
+
+	gotReq2, _, err := repo.GetUpdateByID(t.Context(), req2.ID)
+	require.NoError(t, err)
+	assert.Equal(t, domainquotes.StatusPending, gotReq2.Status, "deferred by the limiter, not failed")
 }
 
 func TestWorker_Process_LogsFetchedQuote(t *testing.T) {

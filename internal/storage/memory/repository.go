@@ -122,16 +122,17 @@ func (r *Repository) ClaimBatch(_ context.Context, limit int, now, visibleSince 
 			if next, err = rec.req.TransitionTo(domainquotes.StatusInProgress, now); err != nil {
 				return nil, err
 			}
+			// Only a fresh pending->in_progress claim spends retry budget;
+			// see storage/postgres's ClaimBatch comment for why a reaper
+			// reclaim below must not.
+			next.Attempts++
 		} else {
 			// Already in_progress: the reaper reclaims it, not a fresh
-			// pending->in_progress transition, so just refresh bookkeeping.
+			// pending->in_progress transition, so just refresh bookkeeping —
+			// attempts stays put, it isn't a real retry against the upstream.
 			next = rec.req
 			next.UpdatedAt = now
 		}
-		// storage/postgres's ClaimBatch increments attempts on every claim,
-		// reaper reclaims included, so this mirrors that regardless of
-		// which branch above ran.
-		next.Attempts++
 		claimed[i] = next
 	}
 
@@ -144,8 +145,10 @@ func (r *Repository) ClaimBatch(_ context.Context, limit int, now, visibleSince 
 
 // transitionRecord looks up id and validates the move to next through
 // CurrencyRateUpdateRequest.TransitionTo — the domain decides legality, not
-// a caller-side status check, mirroring storage/postgres's
-// transitionRequest. Caller must hold r.mu.
+// a caller-side status check. storage/postgres gets the same legality check
+// from its UPDATE ... WHERE status = <expected> instead (see
+// diagnoseTransitionFailure); there's no equivalent WHERE race to guard
+// against here, since every access holds r.mu. Caller must hold r.mu.
 func (r *Repository) transitionRecord(
 	id uuid.UUID, next domainquotes.CurrencyRateUpdateStatus, now time.Time,
 ) (*record, domainquotes.CurrencyRateUpdateRequest, error) {
@@ -179,6 +182,7 @@ func (r *Repository) CompleteSuccess(
 	// once it's read back.
 	next.ErrorCode = ""
 	next.ErrorMessage = ""
+	next.Reused = false
 	rec.quoteID = r.findOrCreateQuote(pair, rate)
 	rec.req = next
 	return nil
@@ -210,6 +214,7 @@ func (r *Repository) CompleteSuccessReuse(_ context.Context, id uuid.UUID, quote
 	}
 	next.ErrorCode = ""
 	next.ErrorMessage = ""
+	next.Reused = true
 	rec.quoteID = quoteID
 	rec.req = next
 	return nil

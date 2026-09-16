@@ -20,12 +20,20 @@ const (
 	UnclassifiedProviderError CurrencyRateErrorCode = "unclassified_provider"
 
 	MalformedResponseError CurrencyRateErrorCode = "malformed_response" // could not parse response, not retryable
+
+	// InternalError marks a failure that isn't the upstream's fault at all —
+	// this service's own code produced it (e.g. Repository.CompleteSuccess
+	// failing). Worker.fail uses it only once DispatchMaxAttempts is
+	// reached on an error it otherwise can't classify, so a bug that keeps
+	// throwing before a row ever reaches CompleteFailure still terminates
+	// instead of cycling through the reaper forever.
+	InternalError CurrencyRateErrorCode = "internal_error"
 )
 
 func (c CurrencyRateErrorCode) Valid() bool {
 	return slices.Contains([]CurrencyRateErrorCode{
 		InvalidRequestError, UnsupportedPairError, AuthError, RateLimitedError,
-		ProviderUnavailableError, UnclassifiedProviderError, MalformedResponseError,
+		ProviderUnavailableError, UnclassifiedProviderError, MalformedResponseError, InternalError,
 	}, c)
 }
 

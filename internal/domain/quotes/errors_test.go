@@ -25,6 +25,7 @@ func TestCurrencyRateErrorCode_Valid(t *testing.T) {
 		{quotes.ProviderUnavailableError, true},
 		{quotes.UnclassifiedProviderError, true},
 		{quotes.MalformedResponseError, true},
+		{quotes.InternalError, true},
 		{quotes.CurrencyRateErrorCode("bogus"), false},
 		{quotes.CurrencyRateErrorCode(""), false},
 	}

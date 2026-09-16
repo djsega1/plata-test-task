@@ -24,13 +24,19 @@ const (
 // one field (a pair string), so this is generous headroom, not a tuned limit.
 const maxCreateUpdateBodyBytes = 4 << 10 // 4 KiB
 
+// maxIdempotencyKeyLen bounds the Idempotency-Key header — unlike the body,
+// http.MaxBytesReader doesn't cover headers, so an unbounded key would grow
+// the quote_updates_idem_idx unique index by however much a client sends.
+const maxIdempotencyKeyLen = 255
+
 const (
-	msgMalformedJSON     = "malformed JSON body"
-	msgPairRequired      = "pair is required"
-	msgPairQueryRequired = "pair query parameter is required"
-	msgNoSuchUpdate      = "no such update"
-	msgNoQuoteYet        = "no quote yet for this pair"
-	msgInternalError     = "internal server error"
+	msgMalformedJSON         = "malformed JSON body"
+	msgPairRequired          = "pair is required"
+	msgIdempotencyKeyTooLong = "Idempotency-Key exceeds 255 characters"
+	msgPairQueryRequired     = "pair query parameter is required"
+	msgNoSuchUpdate          = "no such update"
+	msgNoQuoteYet            = "no quote yet for this pair"
+	msgInternalError         = "internal server error"
 )
 
 // postQuotesUpdatesHandler enqueues a quote refresh. nudge may be nil (see
@@ -50,7 +56,13 @@ func postQuotesUpdatesHandler(logger *slog.Logger, repo quotes.Repository, clk q
 			return
 		}
 
-		result, err := quotes.RequestUpdate(r.Context(), logger, repo, clk, body.Pair, r.Header.Get("Idempotency-Key"))
+		idempotencyKey := r.Header.Get("Idempotency-Key")
+		if len(idempotencyKey) > maxIdempotencyKeyLen {
+			writeError(logger, w, http.StatusBadRequest, codeInvalidRequest, msgIdempotencyKeyTooLong)
+			return
+		}
+
+		result, err := quotes.RequestUpdate(r.Context(), logger, repo, clk, body.Pair, idempotencyKey)
 		if err != nil {
 			switch {
 			case errors.Is(err, domainquotes.ErrMalformedPair):

@@ -73,48 +73,49 @@ func derefOrEmpty(s *string) string {
 	return *s
 }
 
-// transitionRequest validates id's current status against next via
-// CanTransitionTo, giving a specific error instead of the generic
-// "not in_progress" a bare RowsAffected()==0 would give.
-//
-// It doesn't replace the WHERE clause on the caller's own UPDATE: at READ
-// COMMITTED a concurrent tx can still change the row between this read and
-// that UPDATE, so the WHERE match is still what catches the race.
-func (r *Repository) transitionRequest(ctx context.Context, tx pgx.Tx, id uuid.UUID, next domainquotes.CurrencyRateUpdateStatus) error {
+// diagnoseTransitionFailure runs only after a caller's own
+// UPDATE ... WHERE status = <expected> affected zero rows, to turn that
+// into a specific error instead of a bare "0 rows": id not found, or found
+// but not in the status next expects (CanTransitionTo says which). The
+// WHERE clause on that UPDATE is what makes the transition itself
+// race-safe — this SELECT runs only to explain a failure that already
+// happened, so the common (successful) case stays a single round trip
+// instead of paying for a read-then-validate-then-write on every call.
+func (r *Repository) diagnoseTransitionFailure(ctx context.Context, tx pgx.Tx, id uuid.UUID, next domainquotes.CurrencyRateUpdateStatus) error {
 	var status string
 	if err := tx.QueryRow(ctx, `SELECT status FROM quote_updates WHERE id = $1`, id).Scan(&status); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return quotes.ErrNotFound
 		}
-		return fmt.Errorf("read status: %w", err)
+		return fmt.Errorf("read status after failed update: %w", err)
 	}
 	if !domainquotes.CurrencyRateUpdateStatus(status).CanTransitionTo(next) {
 		return fmt.Errorf("invalid status transition: %s -> %s", status, next)
 	}
-	return nil
+	// status matches and next is a legal move from it, yet the UPDATE still
+	// matched zero rows: something changed the row between that UPDATE and
+	// this SELECT.
+	return fmt.Errorf("%s changed status concurrently", id)
 }
 
 // completeSuccessTx closes id by pointing its quote_id at quoteID. Shared by
-// CompleteSuccess (after its journal insert) and CompleteSuccessReuse (which
-// has no insert to run first).
-func (r *Repository) completeSuccessTx(ctx context.Context, tx pgx.Tx, id uuid.UUID, quoteID int64, now time.Time) error {
-	if err := r.transitionRequest(ctx, tx, id, domainquotes.StatusSucceeded); err != nil {
-		return err
-	}
-
+// CompleteSuccess (after its journal insert, reused=false) and
+// CompleteSuccessReuse (no insert to run first, reused=true) — reused feeds
+// the DTO's "cached" field so a client can tell a real provider call from a
+// still-fresh cache hit.
+func (r *Repository) completeSuccessTx(ctx context.Context, tx pgx.Tx, id uuid.UUID, quoteID int64, reused bool, now time.Time) error {
 	// Clears error_code/error_message: a retried request that now succeeds
-	// shouldn't keep reporting its earlier failure. WHERE status still
-	// guards the race transitionRequest's read didn't lock against.
+	// shouldn't keep reporting its earlier failure.
 	tag, err := tx.Exec(ctx, `
 		UPDATE quote_updates
-		SET status = $2, quote_id = $3, updated_at = $4, error_code = NULL, error_message = NULL
+		SET status = $2, quote_id = $3, reused = $6, updated_at = $4, error_code = NULL, error_message = NULL
 		WHERE id = $1 AND status = $5
-	`, id, string(domainquotes.StatusSucceeded), quoteID, now, string(domainquotes.StatusInProgress))
+	`, id, string(domainquotes.StatusSucceeded), quoteID, now, string(domainquotes.StatusInProgress), reused)
 	if err != nil {
 		return fmt.Errorf("update queue row: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("%s changed status concurrently", id)
+		return r.diagnoseTransitionFailure(ctx, tx, id, domainquotes.StatusSucceeded)
 	}
 	return nil
 }
@@ -145,10 +146,19 @@ func (r *Repository) GetByIdempotencyKey(ctx context.Context, key string) (domai
 
 // ClaimBatch's WHERE covers both the pending queue and the reaper: pending
 // rows due by now, plus in_progress rows locked before visibleSince. It
-// doesn't route through transitionRequest/TransitionTo: a reaper reclaim
-// (in_progress -> in_progress, refreshing locked_at/attempts) isn't a
-// transition the domain state machine names, and a batch claim can't afford
-// a read-then-validate-then-write per candidate row anyway.
+// doesn't go through a status-transition check at all: a reaper reclaim
+// (in_progress -> in_progress, refreshing locked_at) isn't a transition the
+// domain state machine names, and a batch claim can't afford a
+// read-then-validate-then-write per candidate row anyway.
+//
+// Only a pending_candidates claim increments attempts; a stuck_candidates
+// reclaim doesn't. attempts gates DispatchMaxAttempts, which is meant to
+// bound genuine retries against the upstream — a worker crashing (or a pass
+// simply not getting to a row before another replica's reaper reclaims it,
+// see DispatchVisibilityTimeout) shouldn't burn that budget before the
+// upstream has failed it even once: ten crash-reclaims followed by one real
+// retryable failure would otherwise read as "attempts exhausted" on the
+// first actual failure.
 //
 // pending_candidates and stuck_candidates are claimed as two separate,
 // independently-limited CTEs rather than one combined WHERE (status = ...
@@ -180,16 +190,17 @@ func (r *Repository) ClaimBatch(ctx context.Context, limit int, now, visibleSinc
 			LIMIT $1
 		),
 		claimed AS (
-			SELECT id FROM (
-				TABLE pending_candidates
+			SELECT id, is_pending FROM (
+				SELECT id, next_attempt_at, TRUE AS is_pending FROM pending_candidates
 				UNION ALL
-				TABLE stuck_candidates
+				SELECT id, next_attempt_at, FALSE AS is_pending FROM stuck_candidates
 			) candidates
 			ORDER BY next_attempt_at
 			LIMIT $1
 		)
 		UPDATE quote_updates AS qu
-		SET status = $5, locked_at = $2, updated_at = $2, attempts = attempts + 1
+		SET status = $5, locked_at = $2, updated_at = $2,
+		    attempts = attempts + CASE WHEN claimed.is_pending THEN 1 ELSE 0 END
 		FROM claimed
 		WHERE qu.id = claimed.id
 		RETURNING qu.id, qu.base, qu.quote, qu.status, qu.attempts, qu.error_code, qu.error_message, qu.created_at, qu.updated_at
@@ -234,7 +245,7 @@ func (r *Repository) CompleteSuccess(
 		return fmt.Errorf("postgres: complete success: upsert quote: %w", err)
 	}
 
-	if err := r.completeSuccessTx(ctx, tx, id, quoteID, now); err != nil {
+	if err := r.completeSuccessTx(ctx, tx, id, quoteID, false, now); err != nil {
 		return fmt.Errorf("postgres: complete success: %w", err)
 	}
 
@@ -261,10 +272,6 @@ func (r *Repository) CompleteFailure(
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op once committed
 
-	if err := r.transitionRequest(ctx, tx, id, nextStatus); err != nil {
-		return fmt.Errorf("postgres: complete failure: %w", err)
-	}
-
 	tag, err := tx.Exec(ctx, `
 		UPDATE quote_updates
 		SET status = $2,
@@ -277,7 +284,7 @@ func (r *Repository) CompleteFailure(
 		return fmt.Errorf("postgres: complete failure: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("postgres: complete failure: %s changed status concurrently", id)
+		return fmt.Errorf("postgres: complete failure: %w", r.diagnoseTransitionFailure(ctx, tx, id, nextStatus))
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -293,6 +300,7 @@ func (r *Repository) GetUpdateByID(ctx context.Context, id uuid.UUID) (domainquo
 		attempts                        int
 		errCode, errMessage             *string
 		createdAt, updatedAt            time.Time
+		reused                          *bool
 		rateStr                         *string
 		derived, indicative             *bool
 		provider, quality               *string
@@ -300,12 +308,12 @@ func (r *Repository) GetUpdateByID(ctx context.Context, id uuid.UUID) (domainquo
 	)
 	err := r.pool.QueryRow(ctx, `
 		SELECT qu.id, qu.base, qu.quote, qu.status, qu.attempts, qu.error_code, qu.error_message, qu.created_at, qu.updated_at,
-		       q.rate::text, q.derived, q.indicative, q.provider, q.quality, q.quoted_at, q.fetched_at, q.stale_after
+		       qu.reused, q.rate::text, q.derived, q.indicative, q.provider, q.quality, q.quoted_at, q.fetched_at, q.stale_after
 		FROM quote_updates qu
 		LEFT JOIN quotes q ON q.id = qu.quote_id
 		WHERE qu.id = $1
 	`, id).Scan(&reqID, &base, &quote, &status, &attempts, &errCode, &errMessage, &createdAt, &updatedAt,
-		&rateStr, &derived, &indicative, &provider, &quality, &quotedAt, &fetchedAt, &staleAfter)
+		&reused, &rateStr, &derived, &indicative, &provider, &quality, &quotedAt, &fetchedAt, &staleAfter)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return domainquotes.CurrencyRateUpdateRequest{}, nil, quotes.ErrNotFound
@@ -326,6 +334,7 @@ func (r *Repository) GetUpdateByID(ctx context.Context, id uuid.UUID) (domainquo
 		UpdatedAt:    updatedAt,
 		ErrorCode:    derefOrEmpty(errCode),
 		ErrorMessage: derefOrEmpty(errMessage),
+		Reused:       reused != nil && *reused,
 	}
 
 	if rateStr == nil {
@@ -398,7 +407,7 @@ func (r *Repository) CompleteSuccessReuse(ctx context.Context, id uuid.UUID, quo
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op once committed
 
-	if err := r.completeSuccessTx(ctx, tx, id, quoteID, now); err != nil {
+	if err := r.completeSuccessTx(ctx, tx, id, quoteID, true, now); err != nil {
 		return fmt.Errorf("postgres: complete success reuse: %w", err)
 	}
 

@@ -75,7 +75,12 @@ type Config struct {
 	// DispatchPoolSize bounds requests in flight at once across a batch.
 	DispatchPoolSize int
 	// DispatchVisibilityTimeout is how long a claimed row may stay
-	// in_progress before it's reclaimed. Must exceed the provider's HTTP timeout.
+	// in_progress before it's reclaimed. Must be >= DispatchPassTimeout: a
+	// whole batch is claimed (and locked_at set) at once, but a given row
+	// isn't actually worked until its turn in the pool, so a row can sit
+	// claimed for close to a full pass before Process ever runs on it. A
+	// shorter visibility timeout would let another replica's reaper reclaim
+	// (and re-dispatch) a row this pass hasn't gotten to yet.
 	DispatchVisibilityTimeout time.Duration
 	// DispatchBaseBackoff is Worker's floor retry delay — raised to a
 	// failure's own Retry-After when that's longer, then jittered.
@@ -124,10 +129,12 @@ const (
 	defaultRateLimitPerMinute = 12
 	defaultRateLimitPerHour   = 100
 
-	defaultDispatchTickInterval      = 5 * time.Second
-	defaultDispatchBatchSize         = 100
-	defaultDispatchPoolSize          = 8
-	defaultDispatchVisibilityTimeout = 30 * time.Second
+	defaultDispatchTickInterval = 5 * time.Second
+	defaultDispatchBatchSize    = 100
+	defaultDispatchPoolSize     = 8
+	// defaultDispatchVisibilityTimeout: must be >= defaultDispatchPassTimeout
+	// (see the field comment) — set with headroom above it, not equal to it.
+	defaultDispatchVisibilityTimeout = 120 * time.Second
 	defaultDispatchBaseBackoff       = 5 * time.Second
 	// defaultDispatchMaxBackoff caps the exponential growth below.
 	defaultDispatchMaxBackoff = 5 * time.Minute
@@ -279,6 +286,31 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 	}
 	if cfg.Storage == StoragePostgres && cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("config: DATABASE_URL is required when STORAGE/--storage is %q", StoragePostgres)
+	}
+
+	// A claimed batch's locked_at is set for every row at once, but a row
+	// near the back of the pool queue isn't worked until close to
+	// DispatchPassTimeout later — a shorter visibility timeout would let the
+	// reaper (this replica's next pass, or another replica's) reclaim a row
+	// that's still legitimately in flight. See the field comment.
+	if cfg.DispatchVisibilityTimeout < cfg.DispatchPassTimeout {
+		return Config{}, fmt.Errorf(
+			"config: DISPATCH_VISIBILITY_TIMEOUT (%s) must be >= DISPATCH_PASS_TIMEOUT (%s)",
+			cfg.DispatchVisibilityTimeout, cfg.DispatchPassTimeout,
+		)
+	}
+
+	// PostgresMaxConns == 0 defers to pgxpool's own default (max(4,
+	// NumCPU)), which this code can't see at parse time, so it's only
+	// checked when the operator set it explicitly: a pool smaller than the
+	// dispatcher's own worker count would starve HTTP handlers of
+	// connections under load, and look like "the database is slow" instead
+	// of a config error.
+	if cfg.PostgresMaxConns > 0 && cfg.PostgresMaxConns < cfg.DispatchPoolSize {
+		return Config{}, fmt.Errorf(
+			"config: POSTGRES_MAX_CONNS (%d) must be >= DISPATCH_POOL_SIZE (%d), plus headroom for HTTP handlers",
+			cfg.PostgresMaxConns, cfg.DispatchPoolSize,
+		)
 	}
 
 	return cfg, nil

@@ -106,6 +106,14 @@ func (w *Worker) resolve(ctx context.Context, pair domainquotes.CurrencyPair) (r
 
 		raw, err := w.provider.GetCurrencyRate(ctx, pair)
 		if err != nil {
+			// A Retry-After from the upstream is a shared budget, not a
+			// per-pair one: pause every pair's calls, not just this row's
+			// own backoff, or the other five pairs keep spending a budget
+			// the upstream just said is empty.
+			var rateErr domainquotes.CurrencyRateError
+			if errors.As(err, &rateErr) && rateErr.RetryAfter() > 0 {
+				w.limiter.CoolDown(w.clock.Now().Add(rateErr.RetryAfter()))
+			}
 			return nil, err
 		}
 
@@ -127,18 +135,26 @@ func (w *Worker) resolve(ctx context.Context, pair domainquotes.CurrencyPair) (r
 }
 
 // fail records a provider/business failure against id. An err that isn't a
-// CurrencyRateError is not this service's to classify, so it's returned
-// as-is for the caller to log as an infrastructure failure.
+// CurrencyRateError is not this service's to classify, so — while there's
+// still retry budget left — it's returned as-is for the caller to log as an
+// infrastructure failure, leaving the row in_progress for the reaper.
 //
 // attempts is req.Attempts as ClaimBatch left it. Once it reaches
 // maxAttempts, a retryable error still stops here instead of going back to
 // pending, so a permanently unavailable upstream doesn't cycle forever
 // unrecorded; errCode becomes attemptsExhaustedCode to distinguish this
-// from a genuinely non-retryable error.
+// from a genuinely non-retryable error. The same budget applies to an
+// unclassified err: without it, a bug that keeps failing before a row ever
+// reaches CompleteFailure (a Repository outage, say) would cycle through
+// the reaper indefinitely, never recorded and never surfaced to the client
+// polling GET /quotes/updates/{id}.
 func (w *Worker) fail(ctx context.Context, id uuid.UUID, pair domainquotes.CurrencyPair, attempts int, err error, now time.Time) error {
 	var rateErr domainquotes.CurrencyRateError
 	if !errors.As(err, &rateErr) {
-		return err
+		if attempts < w.maxAttempts {
+			return err
+		}
+		rateErr = domainquotes.NewCurrencyRateError(domainquotes.InternalError, err.Error(), false, 0, "")
 	}
 
 	errCode, errMessage, retryable := string(rateErr.Code()), rateErr.Error(), rateErr.Retryable()

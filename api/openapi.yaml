@@ -36,9 +36,10 @@ paths:
             Scoped to this endpoint only. A replay of the same key returns
             the original update with 200 and Idempotency-Replayed: true
             instead of creating a second one; the same key with a
-            different pair is a 409.
+            different pair is a 409. Max 255 characters — longer is a 400.
           schema:
             type: string
+            maxLength: 255
       requestBody:
         required: true
         content:
@@ -68,7 +69,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/UpdateAccepted"
         "400":
-          description: Malformed body, missing pair, or pair not shaped BASE/QUOTE
+          description: >-
+            Malformed body, missing pair, pair not shaped BASE/QUOTE, or
+            Idempotency-Key over 255 characters
           content:
             application/json:
               schema:
@@ -132,6 +135,7 @@ paths:
                     quality: live
                     derived: false
                     indicative: true
+                    cached: false
                 pending:
                   value:
                     update_id: 6f1e5e4a-1c2d-7a3b-8f9e-000000000002
@@ -277,6 +281,13 @@ components:
             status:
               type: string
               enum: [pending, in_progress, succeeded, failed]
+            cached:
+              type: boolean
+              description: >-
+                Present only when status is succeeded. true if this update
+                reused an already-fresh quote instead of calling the
+                provider — otherwise a client can't tell a real refresh
+                from a cache hit up to stale_after old.
             attempts:
               type: integer
               description: Present only when status is failed.

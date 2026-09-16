@@ -39,13 +39,23 @@ type CurrencyRateUpdateRequest struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time
 
-	// Attempts counts every claim (including reaper reclaims) for the
-	// request's lifetime; it never resets. ErrorCode/ErrorMessage report the
-	// most recent failure and can be non-empty on a Pending row mid-backoff;
-	// only CompleteSuccess clears them.
+	// Attempts counts every pending->in_progress claim (a reaper reclaim of
+	// a stuck in_progress row does not) for the request's lifetime; it
+	// never resets. ErrorCode/ErrorMessage report the most recent failure
+	// and can be non-empty on a Pending row mid-backoff; only CompleteSuccess
+	// clears them.
 	Attempts     int
 	ErrorCode    string
 	ErrorMessage string
+
+	// Reused reports whether this request's success reused an
+	// already-fresh quote (CompleteSuccessReuse) instead of triggering a
+	// real provider call (CompleteSuccess). Meaningful only when
+	// Status == StatusSucceeded, and only populated by GetUpdateByID — the
+	// one caller (GET /quotes/updates/{id}) whose response needs to tell a
+	// client "we went and looked" apart from "we handed back a cached
+	// price"; ClaimBatch/GetByIdempotencyKey leave it false unconditionally.
+	Reused bool
 }
 
 func NewCurrencyRateUpdateRequest(pair CurrencyPair, now time.Time) CurrencyRateUpdateRequest {

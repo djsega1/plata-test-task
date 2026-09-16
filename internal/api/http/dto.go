@@ -77,6 +77,11 @@ type updateStatusResponse struct {
 	Pair     string `json:"pair"`
 	Status   string `json:"status"`
 	*quoteRateDTO
+	// Cached reports, only once Status is "succeeded", whether this update
+	// reused an already-fresh quote instead of calling the provider — a
+	// request that asked to refresh isn't otherwise distinguishable from
+	// one that just handed back a price from up to stale_after ago.
+	Cached   *bool      `json:"cached,omitempty"`
 	Attempts int        `json:"attempts,omitempty"`
 	Error    *errorBody `json:"error,omitempty"`
 }
@@ -90,6 +95,9 @@ func newUpdateStatusResponse(req domainquotes.CurrencyRateUpdateRequest, rate *d
 	if rate != nil {
 		dto := newQuoteRateDTO(*rate)
 		resp.quoteRateDTO = &dto
+	}
+	if req.Status == domainquotes.StatusSucceeded {
+		resp.Cached = &req.Reused
 	}
 	if req.Status == domainquotes.StatusFailed {
 		resp.Attempts = req.Attempts

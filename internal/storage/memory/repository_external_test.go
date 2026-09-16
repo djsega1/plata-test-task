@@ -162,6 +162,7 @@ func TestClaimBatch_ReclaimsStuckInProgress(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, reclaimed, 1)
 	assert.Equal(t, req.ID, reclaimed[0].ID)
+	assert.Equal(t, 1, reclaimed[0].Attempts, "a reaper reclaim isn't a real retry against the upstream, so it must not spend attempts budget")
 }
 
 func TestCompleteSuccess(t *testing.T) {

@@ -64,6 +64,34 @@ func TestRateLimiter_ZeroMeansNoLimit(t *testing.T) {
 	}
 }
 
+func TestRateLimiter_CoolDownBlocksUntilExpiry(t *testing.T) {
+	limiter := quotes.NewRateLimiter(100, 1000)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	limiter.CoolDown(now.Add(60 * time.Second))
+
+	ok, retryAfter := limiter.Allow(now)
+	assert.False(t, ok, "an active cooldown must block a call even with room left in both windows")
+	assert.Equal(t, 60*time.Second, retryAfter)
+
+	ok, _ = limiter.Allow(now.Add(59 * time.Second))
+	assert.False(t, ok, "still inside the cooldown")
+
+	ok, _ = limiter.Allow(now.Add(61 * time.Second))
+	assert.True(t, ok, "cooldown has expired")
+}
+
+func TestRateLimiter_CoolDownNeverShortensAnExistingOne(t *testing.T) {
+	limiter := quotes.NewRateLimiter(100, 1000)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	limiter.CoolDown(now.Add(60 * time.Second))
+	limiter.CoolDown(now.Add(10 * time.Second)) // shorter: must not override the longer one
+
+	ok, _ := limiter.Allow(now.Add(30 * time.Second))
+	assert.False(t, ok, "the earlier, longer cooldown must still be in effect")
+}
+
 func TestRateLimiter_ConcurrentAllow(t *testing.T) {
 	const quota = 5
 	const callers = 20

@@ -192,6 +192,24 @@ func TestLoadDispatchOverrides(t *testing.T) {
 	assert.Equal(t, 30*time.Second, cfg.DispatchPassTimeout)
 }
 
+func TestLoadDispatchVisibilityTimeoutBelowPassTimeoutInvalid(t *testing.T) {
+	_, err := Load(nil, fakeGetenv(withEnv(map[string]string{
+		"DISPATCH_VISIBILITY_TIMEOUT": "10s",
+		"DISPATCH_PASS_TIMEOUT":       "30s",
+	})))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "DISPATCH_VISIBILITY_TIMEOUT")
+}
+
+func TestLoadDispatchVisibilityTimeoutEqualToPassTimeoutValid(t *testing.T) {
+	cfg, err := Load(nil, fakeGetenv(withEnv(map[string]string{
+		"DISPATCH_VISIBILITY_TIMEOUT": "30s",
+		"DISPATCH_PASS_TIMEOUT":       "30s",
+	})))
+	require.NoError(t, err)
+	assert.Equal(t, 30*time.Second, cfg.DispatchVisibilityTimeout)
+}
+
 func TestLoadPostgresMaxConnsOverride(t *testing.T) {
 	cfg, err := Load(nil, fakeGetenv(withEnv(map[string]string{"POSTGRES_MAX_CONNS": "25"})))
 	require.NoError(t, err)
@@ -207,6 +225,23 @@ func TestLoadPostgresMaxConnsZeroIsValid(t *testing.T) {
 func TestLoadPostgresMaxConnsNegativeInvalid(t *testing.T) {
 	_, err := Load(nil, fakeGetenv(withEnv(map[string]string{"POSTGRES_MAX_CONNS": "-1"})))
 	assert.Error(t, err)
+}
+
+func TestLoadPostgresMaxConnsBelowDispatchPoolSizeInvalid(t *testing.T) {
+	_, err := Load(nil, fakeGetenv(withEnv(map[string]string{
+		"POSTGRES_MAX_CONNS": "4",
+		"DISPATCH_POOL_SIZE": "8",
+	})))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "POSTGRES_MAX_CONNS")
+}
+
+func TestLoadPostgresMaxConnsUnsetSkipsDispatchPoolSizeCheck(t *testing.T) {
+	// 0 means "leave pgxpool's own default in place" — not checked against
+	// DispatchPoolSize since the actual default isn't known here.
+	cfg, err := Load(nil, fakeGetenv(withEnv(map[string]string{"DISPATCH_POOL_SIZE": "50"})))
+	require.NoError(t, err)
+	assert.Zero(t, cfg.PostgresMaxConns)
 }
 
 func TestLoadPostgresPoolTuningOverride(t *testing.T) {

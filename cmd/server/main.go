@@ -78,10 +78,21 @@ func run() int {
 	}()
 	// stopDispatch only stops Run from starting another pass; a pass already
 	// in flight keeps running, so waiting on dispatchDone here lets it
-	// finish instead of abandoning claimed rows mid-flight.
+	// finish instead of abandoning claimed rows mid-flight. That wait is
+	// itself bounded by ShutdownTimeout: a pass may legitimately run up to
+	// DispatchPassTimeout (90s by default), well past a typical container
+	// terminationGracePeriodSeconds — abandoning it past the deadline is
+	// safe (delivery is at-least-once; the reaper reclaims it), whereas
+	// blocking here past that grace period trades a clean shutdown for a
+	// SIGKILL that skips it entirely.
 	defer func() {
 		stopDispatch()
-		<-dispatchDone
+		select {
+		case <-dispatchDone:
+		case <-time.After(cfg.ShutdownTimeout):
+			logger.Warn("dispatcher drain timed out; abandoning in-flight pass, reaper will reclaim its rows",
+				"timeout", cfg.ShutdownTimeout)
+		}
 	}()
 
 	srv := &http.Server{

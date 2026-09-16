@@ -223,6 +223,41 @@ func TestRequestIDMiddlewareTrustsInboundHeader(t *testing.T) {
 	}
 }
 
+func TestRequestIDMiddlewareRejectsOversizedInboundHeader(t *testing.T) {
+	var gotID string
+	handler := requestIDMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotID = requestIDFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+	req.Header.Set(requestIDHeader, strings.Repeat("a", maxRequestIDLen+1))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if gotID == "" || len(gotID) > maxRequestIDLen {
+		t.Fatalf("context id = %q, want a freshly generated id, not the oversized inbound one", gotID)
+	}
+}
+
+func TestRequestIDMiddlewareRejectsControlCharactersInboundHeader(t *testing.T) {
+	const malicious = "line1\x00line2"
+	var gotID string
+	handler := requestIDMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotID = requestIDFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+	req.Header[requestIDHeader] = []string{malicious} // bypasses Header.Set's own validation
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if gotID == "" || gotID == malicious {
+		t.Fatalf("context id = %q, want a freshly generated id, not a value with a raw control character", gotID)
+	}
+}
+
 func TestRecoverMiddlewareNoPanic(t *testing.T) {
 	var buf bytes.Buffer
 	logger := bufferLogger(&buf)

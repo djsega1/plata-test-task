@@ -44,9 +44,14 @@ func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 // the same context under a plain string key.
 type requestIDContextKey struct{}
 
-// requestIDHeader is trusted from an upstream when present and echoed back
-// either way.
+// requestIDHeader is trusted from an upstream when present and well-formed,
+// and echoed back either way.
 const requestIDHeader = "X-Request-Id"
+
+// maxRequestIDLen bounds an inbound X-Request-Id: it's stashed verbatim
+// into every downstream log line for this request, so an unbounded value
+// would let a client bloat every one of them.
+const maxRequestIDLen = 100
 
 // requestIDMiddleware assigns every request a trace id (from the inbound
 // X-Request-Id header, or a fresh uuid.NewV7()), stashed in the context for
@@ -59,12 +64,29 @@ const requestIDHeader = "X-Request-Id"
 func requestIDMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get(requestIDHeader)
-		if id == "" {
+		if !validRequestID(id) {
 			id = uuid.NewV7().String()
 		}
 		w.Header().Set(requestIDHeader, id)
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestIDContextKey{}, id)))
 	})
+}
+
+// validRequestID accepts an inbound X-Request-Id only if it's short,
+// printable ASCII — this is trusted as an already-assigned trace id from an
+// upstream proxy, not treated as arbitrary client input, so a client behind
+// no such proxy shouldn't be able to plant a control character or an
+// oversized value into every log line this request produces.
+func validRequestID(id string) bool {
+	if id == "" || len(id) > maxRequestIDLen {
+		return false
+	}
+	for _, r := range id {
+		if r < 0x20 || r > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // requestIDFromContext returns the id requestIDMiddleware stashed in ctx,

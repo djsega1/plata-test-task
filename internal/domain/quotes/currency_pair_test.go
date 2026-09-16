@@ -113,4 +113,24 @@ func TestParseCurrencyPair(t *testing.T) {
 			t.Errorf("want ErrPairNotAllowed for a quote code outside the allow-list, got %v", err)
 		}
 	})
+
+	t.Run("lowercase is normalized, not rejected as unsupported", func(t *testing.T) {
+		pair, err := quotes.ParseCurrencyPair("eur/mxn", "/")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if pair.Base() != quotes.CodeEUR || pair.Quote() != quotes.CodeMXN {
+			t.Errorf("got %s, want EUR/MXN", pair)
+		}
+	})
+
+	t.Run("surrounding whitespace is trimmed", func(t *testing.T) {
+		pair, err := quotes.ParseCurrencyPair("  EUR/MXN  ", "/")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if pair.Base() != quotes.CodeEUR || pair.Quote() != quotes.CodeMXN {
+			t.Errorf("got %s, want EUR/MXN", pair)
+		}
+	})
 }
