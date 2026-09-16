@@ -52,7 +52,7 @@ tasks:
       - go test ./... -cover
 
   test:integration:
-    desc: Run integration tests against PostgreSQL 18+ — needs TEST_DATABASE_URL, see CLAUDE.md
+    desc: "Run integration tests against PostgreSQL 18+ — needs TEST_DATABASE_URL, e.g. postgres://postgres@localhost:5432/quotes"
     cmds:
       - go test -tags=integration -race ./...
 
