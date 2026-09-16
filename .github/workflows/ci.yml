@@ -35,8 +35,9 @@ jobs:
 
       # Pinned to the exact version already validated against
       # .golangci.yml's v2 schema in this repo, not the action's default.
+      # v6 of this action cannot drive a v2 golangci-lint binary; v7 is required.
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
           version: v2.13.2
           args: --build-tags=integration
