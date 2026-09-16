@@ -233,14 +233,7 @@ func (r *Repository) CompleteSuccess(
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op once committed
 
-	var quoteID int64
-	err = tx.QueryRow(ctx, `
-		INSERT INTO quotes (base, quote, rate, provider, quality, derived, indicative, quoted_at, fetched_at, stale_after)
-		VALUES ($1, $2, $3::numeric, $4, $5, $6, $7, $8, $9, $10)
-		ON CONFLICT (provider, base, quote, quoted_at) DO UPDATE SET id = quotes.id
-		RETURNING id
-	`, string(pair.Base()), string(pair.Quote()), rate.Value.String(), rate.Provider, rate.Quality,
-		rate.Derived, rate.Indicative, rate.QuotedAt, rate.FetchedAt, rate.StaleAfter).Scan(&quoteID)
+	quoteID, err := upsertQuote(ctx, tx, pair, rate)
 	if err != nil {
 		return fmt.Errorf("postgres: complete success: upsert quote: %w", err)
 	}
@@ -253,6 +246,40 @@ func (r *Repository) CompleteSuccess(
 		return fmt.Errorf("postgres: complete success: commit: %w", err)
 	}
 	return nil
+}
+
+// upsertQuote inserts rate as a new quotes row, or — on a race with another
+// insert of the same (provider, base, quote, quoted_at) — hands back the
+// winner's id instead of a redundant DO UPDATE SET id = id write.
+//
+// The fallback SELECT runs as its own statement, not a UNION in the same
+// query: a UNION would read under the query's original snapshot, which can
+// predate the winner's commit. A separate statement is safe because
+// Postgres's conflict check makes the INSERT wait for the concurrent
+// inserter to finish before reporting DO NOTHING's empty result.
+func upsertQuote(ctx context.Context, tx pgx.Tx, pair domainquotes.CurrencyPair, rate domainquotes.CurrencyRate) (int64, error) {
+	var quoteID int64
+	err := tx.QueryRow(ctx, `
+		INSERT INTO quotes (base, quote, rate, provider, quality, derived, indicative, quoted_at, fetched_at, stale_after)
+		VALUES ($1, $2, $3::numeric, $4, $5, $6, $7, $8, $9, $10)
+		ON CONFLICT (provider, base, quote, quoted_at) DO NOTHING
+		RETURNING id
+	`, string(pair.Base()), string(pair.Quote()), rate.Value.String(), rate.Provider, rate.Quality,
+		rate.Derived, rate.Indicative, rate.QuotedAt, rate.FetchedAt, rate.StaleAfter).Scan(&quoteID)
+	if err == nil {
+		return quoteID, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return 0, err
+	}
+
+	err = tx.QueryRow(ctx, `
+		SELECT id FROM quotes WHERE provider = $1 AND base = $2 AND quote = $3 AND quoted_at = $4
+	`, rate.Provider, string(pair.Base()), string(pair.Quote()), rate.QuotedAt).Scan(&quoteID)
+	if err != nil {
+		return 0, fmt.Errorf("read row that won the insert race: %w", err)
+	}
+	return quoteID, nil
 }
 
 // CompleteFailure folds both outcomes into one statement: retryable moves

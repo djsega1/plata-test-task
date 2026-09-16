@@ -56,6 +56,7 @@ func TestLoadDefaults(t *testing.T) {
 		DispatchBaseBackoff:       defaultDispatchBaseBackoff,
 		DispatchMaxBackoff:        defaultDispatchMaxBackoff,
 		DispatchMaxAttempts:       defaultDispatchMaxAttempts,
+		DispatchMaxLifetime:       defaultDispatchMaxLifetime,
 		DispatchPassTimeout:       defaultDispatchPassTimeout,
 
 		ProviderHTTPTimeout:             defaultProviderHTTPTimeout,
@@ -177,6 +178,7 @@ func TestLoadDispatchOverrides(t *testing.T) {
 		"DISPATCH_BASE_BACKOFF":       "2s",
 		"DISPATCH_MAX_BACKOFF":        "1m",
 		"DISPATCH_MAX_ATTEMPTS":       "3",
+		"DISPATCH_MAX_LIFETIME":       "2h",
 		"DISPATCH_PASS_TIMEOUT":       "30s",
 	})
 	cfg, err := Load(nil, fakeGetenv(env))
@@ -189,7 +191,24 @@ func TestLoadDispatchOverrides(t *testing.T) {
 	assert.Equal(t, 2*time.Second, cfg.DispatchBaseBackoff)
 	assert.Equal(t, time.Minute, cfg.DispatchMaxBackoff)
 	assert.Equal(t, 3, cfg.DispatchMaxAttempts)
+	assert.Equal(t, 2*time.Hour, cfg.DispatchMaxLifetime)
 	assert.Equal(t, 30*time.Second, cfg.DispatchPassTimeout)
+}
+
+func TestLoadCORSAllowedOriginsOverride(t *testing.T) {
+	cfg, err := Load(nil, fakeGetenv(withEnv(map[string]string{
+		"CORS_ALLOWED_ORIGINS": " https://a.example ,https://b.example,",
+	})))
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"https://a.example", "https://b.example"}, cfg.CORSAllowedOrigins)
+}
+
+func TestLoadCORSAllowedOriginsUnsetIsEmpty(t *testing.T) {
+	cfg, err := Load(nil, fakeGetenv(baseEnv()))
+	require.NoError(t, err)
+
+	assert.Empty(t, cfg.CORSAllowedOrigins)
 }
 
 func TestLoadDispatchVisibilityTimeoutBelowPassTimeoutInvalid(t *testing.T) {

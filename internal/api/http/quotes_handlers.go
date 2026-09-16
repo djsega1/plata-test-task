@@ -18,6 +18,7 @@ const (
 	codeUnsupportedPair     = "unsupported_pair"
 	codeIdempotencyConflict = "idempotency_conflict"
 	codeNotFound            = "not_found"
+	codePayloadTooLarge     = "payload_too_large"
 )
 
 // maxCreateUpdateBodyBytes bounds POST /quotes/updates' request body — it's
@@ -37,6 +38,7 @@ const (
 	msgNoSuchUpdate          = "no such update"
 	msgNoQuoteYet            = "no quote yet for this pair"
 	msgInternalError         = "internal server error"
+	msgPayloadTooLarge       = "request body exceeds the 4 KiB limit"
 )
 
 // postQuotesUpdatesHandler enqueues a quote refresh. nudge may be nil (see
@@ -47,7 +49,13 @@ func postQuotesUpdatesHandler(logger *slog.Logger, repo quotes.Repository, clk q
 		r.Body = http.MaxBytesReader(w, r.Body, maxCreateUpdateBodyBytes)
 
 		var body createUpdateRequest
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields() // an unrecognized field is more likely a client bug than forward-compat growth
+		if err := dec.Decode(&body); err != nil {
+			if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+				writeError(logger, w, http.StatusRequestEntityTooLarge, codePayloadTooLarge, msgPayloadTooLarge)
+				return
+			}
 			writeError(logger, w, http.StatusBadRequest, codeInvalidRequest, msgMalformedJSON)
 			return
 		}
@@ -129,7 +137,7 @@ func getQuotesLatestHandler(logger *slog.Logger, repo quotes.Repository) http.Ha
 			return
 		}
 
-		rate, err := quotes.GetLatest(r.Context(), repo, rawPair)
+		pair, rate, err := quotes.GetLatest(r.Context(), repo, rawPair)
 		if err != nil {
 			switch {
 			case errors.Is(err, domainquotes.ErrMalformedPair):
@@ -144,7 +152,7 @@ func getQuotesLatestHandler(logger *slog.Logger, repo quotes.Repository) http.Ha
 			}
 			return
 		}
-		writeJSON(logger, w, http.StatusOK, newLatestQuoteResponse(rawPair, rate))
+		writeJSON(logger, w, http.StatusOK, newLatestQuoteResponse(pair.String(), rate))
 	}
 }
 

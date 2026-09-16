@@ -115,12 +115,17 @@ func loggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 }
 
 // corsMiddleware lets a browser call the API from a different origin.
-// Origin is reflected back rather than "*" so it still works if the API
-// ever adds cookies/auth. Preflight OPTIONS is answered directly since no
-// route registers that method.
-func corsMiddleware(next http.Handler) http.Handler {
+// allowed, if non-empty, is the only set of Origins reflected back; empty
+// reflects any Origin — safe only as long as this API never sets
+// Access-Control-Allow-Credentials. Preflight OPTIONS is answered directly
+// since no route registers that method.
+func corsMiddleware(allowed []string, next http.Handler) http.Handler {
+	allowedSet := make(map[string]bool, len(allowed))
+	for _, origin := range allowed {
+		allowedSet[origin] = true
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if origin := r.Header.Get("Origin"); origin != "" {
+		if origin := r.Header.Get("Origin"); origin != "" && (len(allowedSet) == 0 || allowedSet[origin]) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
 		}

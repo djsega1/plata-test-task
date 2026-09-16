@@ -91,6 +91,11 @@ type Config struct {
 	// DispatchMaxAttempts caps retries before a failure is marked failed
 	// instead of requeued forever.
 	DispatchMaxAttempts int
+	// DispatchMaxLifetime is Worker's Attempts-independent budget: a reaper
+	// reclaim never increments Attempts, so it's measured from CreatedAt
+	// instead. Keep it comfortably above the normal retry lifetime
+	// (DispatchMaxAttempts backoffs, ~20 minutes by default).
+	DispatchMaxLifetime time.Duration
 	// DispatchPassTimeout bounds one dispatcher pass. Claim/work/complete
 	// run on context.WithoutCancel so shutdown doesn't abort in-flight
 	// work, so this is what stops a stuck call from hanging the goroutine.
@@ -113,6 +118,12 @@ type Config struct {
 	// its own per-minute quota independently of RateLimitPerMinute above.
 	// 0 (the default) disables it.
 	FakeProviderRPMQuota int
+
+	// CORSAllowedOrigins, if non-empty, is the only set of Origins reflected
+	// back in Access-Control-Allow-Origin. Empty (the default) reflects any
+	// Origin — safe only as long as the API never sets
+	// Access-Control-Allow-Credentials.
+	CORSAllowedOrigins []string
 }
 
 const (
@@ -141,6 +152,9 @@ const (
 	// defaultDispatchMaxAttempts: backoff doubles each attempt up to
 	// maxBackoff, so 10 attempts is ~20 minutes before giving up.
 	defaultDispatchMaxAttempts = 10
+	// defaultDispatchMaxLifetime: comfortably above the ~20-minute normal
+	// retry sequence (see defaultDispatchMaxAttempts).
+	defaultDispatchMaxLifetime = time.Hour
 	// defaultDispatchPassTimeout: comfortably above one full batch's worst
 	// case (100/8 rounds * 5s timeout ~= 65s), so only a stuck call hits it.
 	defaultDispatchPassTimeout = 90 * time.Second
@@ -180,6 +194,7 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		DispatchBaseBackoff:       defaultDispatchBaseBackoff,
 		DispatchMaxBackoff:        defaultDispatchMaxBackoff,
 		DispatchMaxAttempts:       defaultDispatchMaxAttempts,
+		DispatchMaxLifetime:       defaultDispatchMaxLifetime,
 		DispatchPassTimeout:       defaultDispatchPassTimeout,
 
 		ProviderHTTPTimeout:             defaultProviderHTTPTimeout,
@@ -207,6 +222,7 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		{"DISPATCH_BASE_BACKOFF", &cfg.DispatchBaseBackoff},
 		{"DISPATCH_PASS_TIMEOUT", &cfg.DispatchPassTimeout},
 		{"DISPATCH_MAX_BACKOFF", &cfg.DispatchMaxBackoff},
+		{"DISPATCH_MAX_LIFETIME", &cfg.DispatchMaxLifetime},
 		{"PROVIDER_HTTP_TIMEOUT", &cfg.ProviderHTTPTimeout},
 		{"PROVIDER_HTTP_IDLE_CONN_TIMEOUT", &cfg.ProviderHTTPIdleConnTimeout},
 	} {
@@ -268,6 +284,14 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 	}
 
 	cfg.DatabaseURL = getenv("DATABASE_URL")
+
+	if v := getenv("CORS_ALLOWED_ORIGINS"); v != "" {
+		for origin := range strings.SplitSeq(v, ",") {
+			if origin = strings.TrimSpace(origin); origin != "" {
+				cfg.CORSAllowedOrigins = append(cfg.CORSAllowedOrigins, origin)
+			}
+		}
+	}
 
 	fs := flag.NewFlagSet("server", flag.ContinueOnError)
 	provider := fs.String("provider", string(cfg.Provider), "rate provider: fake or exchangeratedev (overrides PROVIDER env)")

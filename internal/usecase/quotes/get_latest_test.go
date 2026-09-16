@@ -17,14 +17,14 @@ import (
 func TestGetLatest_NotFound(t *testing.T) {
 	repo := memory.NewRepository()
 
-	_, err := quotes.GetLatest(t.Context(), repo, "EUR/USD")
+	_, _, err := quotes.GetLatest(t.Context(), repo, "EUR/USD")
 	assert.ErrorIs(t, err, quotes.ErrNotFound)
 }
 
 func TestGetLatest_RejectsPairOutsideAllowList(t *testing.T) {
 	repo := memory.NewRepository()
 
-	_, err := quotes.GetLatest(t.Context(), repo, "XXX/USD")
+	_, _, err := quotes.GetLatest(t.Context(), repo, "XXX/USD")
 	assert.Error(t, err)
 }
 
@@ -46,7 +46,7 @@ func TestGetLatest_ReturnsSucceededQuote(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, repo.CompleteSuccess(t.Context(), created.Request.ID, pair, rate, testNow))
 
-	got, err := quotes.GetLatest(t.Context(), repo, "EUR/USD")
+	_, got, err := quotes.GetLatest(t.Context(), repo, "EUR/USD")
 	require.NoError(t, err)
 	assert.True(t, rate.Value.Equal(got.Value))
 }

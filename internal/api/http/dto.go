@@ -4,6 +4,7 @@ import (
 	"time"
 
 	domainquotes "github.com/djsega1/plata-test-task/internal/domain/quotes"
+	"github.com/djsega1/plata-test-task/internal/usecase/quotes"
 )
 
 // errorEnvelope is the single error shape for every non-2xx response:
@@ -101,9 +102,34 @@ func newUpdateStatusResponse(req domainquotes.CurrencyRateUpdateRequest, rate *d
 	}
 	if req.Status == domainquotes.StatusFailed {
 		resp.Attempts = req.Attempts
-		resp.Error = &errorBody{Code: req.ErrorCode, Message: req.ErrorMessage}
+		resp.Error = &errorBody{Code: req.ErrorCode, Message: safeErrorMessage(req.ErrorCode)}
 	}
 	return resp
+}
+
+// safeErrorMessages maps a stored error code to a message safe to hand a
+// client. req.ErrorMessage carries raw detail (dial errors, upstream URLs)
+// for logs and operators, not for the wire.
+var safeErrorMessages = map[string]string{
+	string(domainquotes.InvalidRequestError):       "the request was invalid",
+	string(domainquotes.UnsupportedPairError):      "no rate available for this pair",
+	string(domainquotes.AuthError):                 "the upstream provider rejected the request",
+	string(domainquotes.QuotaExceededError):        "the upstream provider's quota is exhausted",
+	string(domainquotes.RateLimitedError):          "rate limited; retry later",
+	string(domainquotes.ProviderUnavailableError):  "the upstream provider is unavailable",
+	string(domainquotes.UnclassifiedProviderError): "the upstream provider returned an error",
+	string(domainquotes.MalformedResponseError):    "the upstream provider returned an unexpected response",
+	string(domainquotes.InternalError):             "an internal error occurred",
+	quotes.AttemptsExhaustedCode:                   "giving up after repeated failures",
+}
+
+// safeErrorMessage falls back to a generic message for any unrecognized
+// code, rather than ever falling through to the raw stored text.
+func safeErrorMessage(code string) string {
+	if msg, ok := safeErrorMessages[code]; ok {
+		return msg
+	}
+	return "the update failed"
 }
 
 // latestQuoteResponse is GET /quotes/latest's body: same rate fields as a

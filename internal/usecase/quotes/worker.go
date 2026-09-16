@@ -7,17 +7,16 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"time"
-	"uuid"
 
 	"golang.org/x/sync/singleflight"
 
 	domainquotes "github.com/djsega1/plata-test-task/internal/domain/quotes"
 )
 
-// attemptsExhaustedCode marks a failure terminal because maxAttempts was
-// reached, not because the error itself was unretryable — kept distinct so
-// a poison message doesn't look identical to a one-off transient failure.
-const attemptsExhaustedCode = "attempts_exhausted"
+// AttemptsExhaustedCode marks a failure terminal on maxAttempts, not on an
+// unretryable error, so it doesn't read as a genuine permanent failure.
+// Exported for the API layer's safe-message mapping.
+const AttemptsExhaustedCode = "attempts_exhausted"
 
 // Worker resolves a single claimed update request: reuse a quote still
 // inside its StaleAfter window, or fetch a fresh one from the provider.
@@ -32,15 +31,23 @@ type Worker struct {
 	baseBackoff time.Duration
 	maxBackoff  time.Duration
 	maxAttempts int
+	// maxLifetime bounds a request's total age, independent of Attempts: a
+	// reaper reclaim never increments it, so an error recurring only across
+	// reclaims would never trip maxAttempts on its own.
+	maxLifetime time.Duration
+	// fetchTimeout bounds the singleflighted fetch (see fetch), which runs
+	// detached from any single caller's context.
+	fetchTimeout time.Duration
 }
 
 func NewWorker(
 	repo Repository, provider RateProvider, clock Clock, limiter *RateLimiter, logger *slog.Logger,
-	baseBackoff, maxBackoff time.Duration, maxAttempts int,
+	baseBackoff, maxBackoff time.Duration, maxAttempts int, maxLifetime, fetchTimeout time.Duration,
 ) *Worker {
 	return &Worker{
 		repo: repo, provider: provider, clock: clock, limiter: limiter, logger: logger,
 		baseBackoff: baseBackoff, maxBackoff: maxBackoff, maxAttempts: maxAttempts,
+		maxLifetime: maxLifetime, fetchTimeout: fetchTimeout,
 	}
 }
 
@@ -57,12 +64,12 @@ type resolvedQuote struct {
 // classified failure is handled internally via CompleteFailure and returns
 // nil.
 func (w *Worker) Process(ctx context.Context, req domainquotes.CurrencyRateUpdateRequest) error {
-	resolved, err := w.resolve(ctx, req.Pair)
+	resolved, err := w.resolve(req.Pair)
 	// Read after resolve: it can block on a real upstream call, and both
 	// CompleteSuccess and fail's backoff must anchor to completion time.
 	now := w.clock.Now()
 	if err != nil {
-		return w.fail(ctx, req.ID, req.Pair, req.Attempts, err, now)
+		return w.fail(ctx, req, err, now)
 	}
 
 	// A reused quote is already a row in the journal: just point this
@@ -81,52 +88,19 @@ func (w *Worker) Process(ctx context.Context, req domainquotes.CurrencyRateUpdat
 }
 
 // resolve single-flights the whole reuse-or-fetch decision per pair, not
-// just the provider call: re-reading GetLatestQuote inside the same
-// critical section closes the window where a caller that read a stale
-// quote just before another's fetch lands would otherwise fetch again on
-// its own.
-func (w *Worker) resolve(ctx context.Context, pair domainquotes.CurrencyPair) (resolvedQuote, error) {
+// just the provider call: re-reading GetLatestQuote inside the same call
+// closes the window where a caller that read a stale quote just before
+// another's fetch lands would otherwise fetch again on its own.
+//
+// Uses Do, not DoChan: DoChan always runs fn on a goroutine of its own, and
+// singleflight repanics there with go panic(e) instead of ever delivering
+// the panic back through the channel — a provider panic would crash the
+// process. Do runs the leader's fn on the leader's own goroutine, so a
+// panic unwinds normally into whichever caller's recover is already in
+// place.
+func (w *Worker) resolve(pair domainquotes.CurrencyPair) (resolvedQuote, error) {
 	v, err, _ := w.sf.Do(pair.String(), func() (any, error) {
-		latest, quoteID, err := w.repo.GetLatestQuote(ctx, pair)
-		switch {
-		case err == nil && w.clock.Now().Before(latest.StaleAfter):
-			w.logger.Debug("reusing cached quote", "pair", pair.String(), "quality", latest.Quality, "stale_after", latest.StaleAfter)
-			return resolvedQuote{rate: latest, quoteID: quoteID}, nil
-		case err != nil && !errors.Is(err, ErrNotFound):
-			return nil, err
-		}
-		// Stale or missing (ErrNotFound): fall through to fetch a fresh quote.
-
-		if ok, retryAfter := w.limiter.Allow(w.clock.Now()); !ok {
-			w.logger.Warn("outbound rate budget exhausted", "pair", pair.String(), "retry_after", retryAfter)
-			return nil, domainquotes.NewCurrencyRateError(
-				domainquotes.RateLimitedError, "outbound rate budget exhausted", true, retryAfter, "",
-			)
-		}
-
-		raw, err := w.provider.GetCurrencyRate(ctx, pair)
-		if err != nil {
-			// A Retry-After from the upstream is a shared budget, not a
-			// per-pair one: pause every pair's calls, not just this row's
-			// own backoff, or the other five pairs keep spending a budget
-			// the upstream just said is empty.
-			var rateErr domainquotes.CurrencyRateError
-			if errors.As(err, &rateErr) && rateErr.RetryAfter() > 0 {
-				w.limiter.CoolDown(w.clock.Now().Add(rateErr.RetryAfter()))
-			}
-			return nil, err
-		}
-
-		rate, err := domainquotes.NewCurrencyRate(
-			raw.Value, raw.Derived, raw.Quality, w.provider.Provider(), w.provider.Indicative(),
-			raw.QuotedAt, w.clock.Now(), w.provider.StaleAfter(raw.Quality, raw.QuotedAt),
-		)
-		if err != nil {
-			return nil, domainquotes.NewCurrencyRateError(domainquotes.MalformedResponseError, err.Error(), false, 0, "")
-		}
-		w.logger.Info("fetched quote from provider", "pair", pair.String(),
-			"provider", rate.Provider, "quality", rate.Quality, "derived", rate.Derived)
-		return resolvedQuote{rate: rate}, nil
+		return w.fetch(pair)
 	})
 	if err != nil {
 		return resolvedQuote{}, err
@@ -134,33 +108,81 @@ func (w *Worker) resolve(ctx context.Context, pair domainquotes.CurrencyPair) (r
 	return v.(resolvedQuote), nil
 }
 
-// fail records a provider/business failure against id. An err that isn't a
-// CurrencyRateError is not this service's to classify, so — while there's
-// still retry budget left — it's returned as-is for the caller to log as an
-// infrastructure failure, leaving the row in_progress for the reaper.
+// fetch is resolve's singleflighted body: reuse a still-fresh quote, or
+// call the provider. Runs on its own context, not the caller's — the
+// singleflight leader is otherwise indistinguishable from any other caller,
+// and its ctx ending would cancel this shared call for everyone coalesced
+// onto it. fetchTimeout bounds it instead.
+func (w *Worker) fetch(pair domainquotes.CurrencyPair) (any, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), w.fetchTimeout)
+	defer cancel()
+
+	latest, quoteID, err := w.repo.GetLatestQuote(ctx, pair)
+	switch {
+	case err == nil && w.clock.Now().Before(latest.StaleAfter):
+		w.logger.Debug("reusing cached quote", "pair", pair.String(), "quality", latest.Quality, "stale_after", latest.StaleAfter)
+		return resolvedQuote{rate: latest, quoteID: quoteID}, nil
+	case err != nil && !errors.Is(err, ErrNotFound):
+		return nil, err
+	}
+	// Stale or missing (ErrNotFound): fall through to fetch a fresh quote.
+
+	if ok, retryAfter := w.limiter.Allow(w.clock.Now()); !ok {
+		w.logger.Warn("outbound rate budget exhausted", "pair", pair.String(), "retry_after", retryAfter)
+		return nil, domainquotes.NewCurrencyRateError(
+			domainquotes.RateLimitedError, "outbound rate budget exhausted", true, retryAfter, "",
+		)
+	}
+
+	raw, err := w.provider.GetCurrencyRate(ctx, pair)
+	if err != nil {
+		// A Retry-After from the upstream is a shared budget, not a
+		// per-pair one: pause every pair's calls, not just this row's
+		// own backoff, or the other five pairs keep spending a budget
+		// the upstream just said is empty.
+		var rateErr domainquotes.CurrencyRateError
+		if errors.As(err, &rateErr) && rateErr.RetryAfter() > 0 {
+			w.limiter.CoolDown(w.clock.Now().Add(rateErr.RetryAfter()))
+		}
+		return nil, err
+	}
+
+	rate, err := domainquotes.NewCurrencyRate(
+		raw.Value, raw.Derived, raw.Quality, w.provider.Provider(), w.provider.Indicative(),
+		raw.QuotedAt, w.clock.Now(), w.provider.StaleAfter(raw.Quality, raw.QuotedAt),
+	)
+	if err != nil {
+		return nil, domainquotes.NewCurrencyRateError(domainquotes.MalformedResponseError, err.Error(), false, 0, "")
+	}
+	w.logger.Info("fetched quote from provider", "pair", pair.String(),
+		"provider", rate.Provider, "quality", rate.Quality, "derived", rate.Derived)
+	return resolvedQuote{rate: rate}, nil
+}
+
+// fail records a provider/business failure against req.ID. An err that
+// isn't a CurrencyRateError is not this service's to classify, so — while
+// budget remains — it's returned as-is, leaving the row in_progress for the
+// reaper.
 //
-// attempts is req.Attempts as ClaimBatch left it. Once it reaches
-// maxAttempts, a retryable error still stops here instead of going back to
-// pending, so a permanently unavailable upstream doesn't cycle forever
-// unrecorded; errCode becomes attemptsExhaustedCode to distinguish this
-// from a genuinely non-retryable error. The same budget applies to an
-// unclassified err: without it, a bug that keeps failing before a row ever
-// reaches CompleteFailure (a Repository outage, say) would cycle through
-// the reaper indefinitely, never recorded and never surfaced to the client
-// polling GET /quotes/updates/{id}.
-func (w *Worker) fail(ctx context.Context, id uuid.UUID, pair domainquotes.CurrencyPair, attempts int, err error, now time.Time) error {
+// Two independent budgets gate that: Attempts and CreatedAt's age against
+// maxLifetime. Attempts alone isn't enough, since a reaper reclaim never
+// increments it — an error recurring only across reclaims would leave
+// Attempts frozen and never trip maxAttempts.
+func (w *Worker) fail(ctx context.Context, req domainquotes.CurrencyRateUpdateRequest, err error, now time.Time) error {
+	id, pair, attempts := req.ID, req.Pair, req.Attempts
+
 	var rateErr domainquotes.CurrencyRateError
 	if !errors.As(err, &rateErr) {
-		if attempts < w.maxAttempts {
+		if attempts < w.maxAttempts && now.Sub(req.CreatedAt) < w.maxLifetime {
 			return err
 		}
 		rateErr = domainquotes.NewCurrencyRateError(domainquotes.InternalError, err.Error(), false, 0, "")
 	}
 
 	errCode, errMessage, retryable := string(rateErr.Code()), rateErr.Error(), rateErr.Retryable()
-	if retryable && attempts >= w.maxAttempts {
+	if retryable && (attempts >= w.maxAttempts || now.Sub(req.CreatedAt) >= w.maxLifetime) {
 		retryable = false
-		errCode = attemptsExhaustedCode
+		errCode = AttemptsExhaustedCode
 		errMessage = fmt.Sprintf("giving up after %d attempts: %s", attempts, rateErr.Error())
 	}
 

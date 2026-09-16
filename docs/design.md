@@ -111,6 +111,9 @@ GET /updates/{id}, GET /latest ──▶ только чтение из БД
 ## 4. Контракт API
 
 Базовый путь `/api/v1`, JSON. Ошибки единым конвертом: `{"error":{"code":"...","message":"..."}}`.
+`message` для `failed`-заявки — фиксированная строка по `code`, не сырой `error_message` из БД: тот
+может нести внутреннюю деталь сбоя (URL апстрима и т.п.), она остаётся в логах, наружу — только код и
+безопасная формулировка.
 
 **Пара — строка через `/` (`EUR/MXN`), не через `-`.** Дефис у `exchangerate.dev` — формат адаптера,
 не контракта. На границе `pair` разбирается на `CurrencyPair`: `ParseCurrencyPair` сначала обрезает
@@ -216,12 +219,15 @@ CREATE TABLE quote_updates (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE UNIQUE INDEX quote_updates_idem_idx  ON quote_updates (idempotency_key)
+CREATE UNIQUE INDEX quote_updates_idem_idx    ON quote_updates (idempotency_key)
     WHERE idempotency_key IS NOT NULL;
-CREATE INDEX        quote_updates_queue_idx ON quote_updates (next_attempt_at)
+CREATE INDEX        quote_updates_queue_idx   ON quote_updates (next_attempt_at)
     WHERE status = 'pending';
-CREATE INDEX        quote_updates_stuck_idx ON quote_updates (locked_at)
+CREATE INDEX        quote_updates_stuck_idx   ON quote_updates (locked_at)
     WHERE status = 'in_progress';
+-- FK-поддержка: без неё будущий retention-DELETE на quotes сканировал бы
+-- quote_updates построчно.
+CREATE INDEX        quote_updates_quote_id_idx ON quote_updates (quote_id);
 ```
 
 - **Очередь живёт в БД, а не в канале.** Клиенту уже отдан `update_id` — обещание должно переживать
@@ -231,6 +237,13 @@ CREATE INDEX        quote_updates_stuck_idx ON quote_updates (locked_at)
   только `quote_id` у заявки: иначе каждое переиспользование (обычный случай для активной пары) было
   бы `INSERT ... ON CONFLICT DO UPDATE`, то есть запись/блокировка строки на каждый запрос, а не
   только на реальный поход к провайдеру.
+- **Свежий поход тоже не пишет лишний раз при гонке.** Заявки, чей `resolve` совпал в один вызов
+  провайдера (single-flight ниже), получают идентичный `rate` и каждая сама вызывает
+  `CompleteSuccess` — N вставок гонятся за одним и тем же `(provider, base, quote, quoted_at)`.
+  `upsertQuote`: `INSERT ... ON CONFLICT DO NOTHING RETURNING id`, при пустом результате — отдельный
+  `SELECT` за id победителя (не `UNION` в одном запросе: тот читает исходный снапшот, который может
+  предшествовать коммиту победителя). Так проигравшие гонку не платят настоящей записью
+  (`DO UPDATE SET id = id`, как раньше) за строку, которую не создавали.
 - **Сортировка по `quoted_at`, не по `fetched_at`.** Провайдер может ответить курсом старше уже
   сохранённого (отстающая реплика, откат на суточный источник); «последняя» по `fetched_at` тогда
   была бы неверной. `fetched_at` остаётся в данных — виден возраст чтения и лаг источника.
@@ -257,7 +270,9 @@ CREATE INDEX        quote_updates_stuck_idx ON quote_updates (locked_at)
   рестарт горутины подсчёт: без разделения десять реклеймов подряд (упавший процесс, не апстрим)
   съедали бы весь бюджет раньше, чем случится хоть одна настоящая неудача. `ClaimBatch` различает
   ветки прямо в `UPDATE` (флаг `is_pending` из объединения `pending_candidates`/`stuck_candidates`);
-  `memory.Repository` — тем же условием на стороне Go.
+  `memory.Repository` — тем же условием на стороне Go. Оборотная сторона: `attempts` может застыть
+  навсегда, если строка попадает воркеру только через реклейм — тогда её ограничивает не этот бюджет,
+  а `DISPATCH_MAX_LIFETIME` (§6).
 - **`id` — UUIDv7, не v4.** Генерируется в Go (`uuid.NewV7()`, до `INSERT`) — `202` должен вернуть
   `update_id` немедленно. v7 хранит таймстамп, вставки по первичному ключу остаются упорядоченными,
   не разбросаны по B-tree, как со случайным v4. Требует PostgreSQL 18+.
@@ -289,11 +304,11 @@ CREATE INDEX        quote_updates_stuck_idx ON quote_updates (locked_at)
 `error_message` при успехе, но не `Attempts` — это счётчик за всё время жизни заявки.
 
 **Диспетчер.** `DISPATCH_TICK_INTERVAL` (5с), `DISPATCH_BATCH_SIZE` (100), `DISPATCH_POOL_SIZE` (8),
-`DISPATCH_VISIBILITY_TIMEOUT` (120с), `DISPATCH_BASE_BACKOFF` (5с). `Dispatcher.Run` перезапускает
-клейм сам, пока батч приходит полным, не дожидаясь следующего `nudge`/тика — иначе дренирование
-бэклога было бы ограничено `DISPATCH_BATCH_SIZE/DISPATCH_TICK_INTERVAL` независимо от размера
-очереди. Паника внутри `ClaimBatch` логируется на уровне `Run`, цикл продолжает со следующего
-`nudge`/тика.
+`DISPATCH_VISIBILITY_TIMEOUT` (120с), `DISPATCH_BASE_BACKOFF` (5с), `DISPATCH_MAX_LIFETIME` (1ч, см.
+ниже). `Dispatcher.Run` перезапускает клейм сам, пока батч приходит полным, не дожидаясь следующего
+`nudge`/тика — иначе дренирование бэклога было бы ограничено
+`DISPATCH_BATCH_SIZE/DISPATCH_TICK_INTERVAL` независимо от размера очереди. Паника внутри `ClaimBatch`
+логируется на уровне `Run`, цикл продолжает со следующего `nudge`/тика.
 
 Каждый пасс `Run` — на `context.WithTimeout(context.WithoutCancel(ctx), DISPATCH_PASS_TIMEOUT)` (90с
 по умолчанию, с запасом над `⌈100/8⌉ * 5с ≈ 65с`). `WithoutCancel` снимает только отмену через
@@ -309,18 +324,31 @@ shutdown — без своего таймаута зависший вызов к
 
 `DISPATCH_MAX_ATTEMPTS` (10) — после скольких retryable-неудач `Worker.fail` помечает заявку
 `failed` сама (`error_code = attempts_exhausted`), иначе постоянно недоступный апстрим держал бы
-заявку в вечном цикле реклейма. Тот же бюджет действует и на ошибку, которую `Worker.fail` не смог
+заявку в вечном цикле реклейма. Тот же бюджет задуман и для ошибки, которую `Worker.fail` не смог
 классифицировать (`errors.As` не находит `CurrencyRateError`, например при сбое самого
 `Repository`): пока попыток меньше `DISPATCH_MAX_ATTEMPTS`, она возвращается наверх непронормированной
-и строка остаётся `in_progress` для реапера, как и раньше; исчерпав бюджет, `Worker.fail` сам
-завершает её `failed` с кодом `internal_error` — иначе баг, стабильно падающий до `CompleteFailure`,
-крутил бы строку через реапер вечно, никогда не становясь видимым клиенту, поллящему
-`GET /quotes/updates/{id}`.
+и строка остаётся `in_progress` для реапера, как и раньше.
+
+Одного `DISPATCH_MAX_ATTEMPTS` для неклассифицированной ошибки недостаточно: `attempts` растёт только
+на `pending -> in_progress` клейме (§5), а строка, падающая с такой ошибкой сразу после каждого
+реклейма, реклеймится реапером снова с тем же `attempts` — ветка `attempts >= DISPATCH_MAX_ATTEMPTS`
+не сработает никогда. `DISPATCH_MAX_LIFETIME` (час по умолчанию) — второй, независимый от `attempts`
+бюджет по `created_at`: исчерпан любой из двух — `Worker.fail` завершает заявку `failed`
+(`internal_error`). Взят с запасом над обычным временем ретраев (~20 минут при дефолтах).
 
 `DISPATCH_BASE_BACKOFF` растёт экспоненциально с числом попыток (5с, 10с, 20с...) до потолка
 `DISPATCH_MAX_BACKOFF` (5м), затем поднимается выше только если у ошибки свой `Retry-After` длиннее.
 С дефолтным потолком 10 попыток дают ~20 минут (5+10+20+40+80+160+300×3) — осмысленная граница
 вместо фиксированного ритма по недоступному источнику.
+
+**Single-flight — на `sf.Do`, не `sf.DoChan`.** `DoChan` всегда запускает функцию в отдельной
+горутине, и паника там не долетает обратно через канал — `singleflight` в этом случае сам роняет
+процесс. `Do` исполняет функцию в горутине лидера, поэтому паника похода к провайдеру ловится тем же
+`recover`, что и любая другая паника в `ClaimAndDispatch`.
+
+Сам поход при этом не привязан к `ctx` конкретного вызывающего: раньше отмена или таймаут лидера
+обрывали поход для всех, кто на него скооперировался, хотя их контекст был ещё жив. Теперь —
+`context.Background()` со своим таймаутом (`DISPATCH_PASS_TIMEOUT`).
 
 **Наблюдаемость.** `Worker`/`RequestUpdate`/`Dispatcher` логируют через явный `*slog.Logger`: поход к
 провайдеру и успех — `Info`, переиспользование котировки — `Debug`, исчерпание лимитера и отложенный
@@ -356,8 +384,10 @@ HTTP-хендлеры ждать — в проде это выглядело б�
 `ReadTimeout` сам по себе объём не ограничивает.
 
 **OpenAPI UI** — `swaggerapi/swagger-ui` в `docker-compose.yml`, версия зафиксирована тегом.
-`corsMiddleware` отражает `Origin` (не `*` — не работает с credentialed-запросами) и отвечает на
-preflight `OPTIONS` напрямую — оба нужны, чтобы «Try it out» доходил до бэкенда.
+`corsMiddleware` без настройки отражает любой `Origin`, чтобы «Try it out» доходил до бэкенда без
+лишней настройки; это безопасно, пока сервис не выставляет `Access-Control-Allow-Credentials`.
+`CORS_ALLOWED_ORIGINS` (список через запятую) переключает middleware на явный allow-list — понадобится,
+если появится cookie/credentialed-аутентификация.
 
 **Сопутствующие скрипты.** `cmd/throughput` + `scripts/throughput.sh` — измерение пропускной
 способности конвейера, отдельная программа на stdlib, не часть сервиса. `scripts/smoke.sh` разбирает
@@ -396,7 +426,9 @@ GitHub Actions; интеграционные тесты — под `//go:build i
 
 **Против настоящего PostgreSQL 18:** конкурентный `ClaimBatch` не выдаёт задачу дважды ни внутри
 процесса, ни двум репликам; уникальность `idempotency_key`; reaper реклеймит зависшее; дедуп `quotes`
-по `(provider, base, quote, quoted_at)`; миграции `Up`/`Down`/`Up`, конкурентные — под advisory lock.
+по `(provider, base, quote, quoted_at)`, включая конкурентную вставку одинаковой котировки (20
+параллельных `CompleteSuccess` → одна строка); миграции `Up`/`Down`/`Up`, конкурентные — под advisory
+lock.
 Живым бинарником: `POST` → `Dispatcher.Run` → `succeeded` без ручного вмешательства (проверено на
 случайной паре и на переиспользовании — `cached:false`/`cached:true` соответственно); рестарт без
 `-v` переживает том и котировки. Graceful shutdown по `SIGTERM` — под секунду при простаивающем

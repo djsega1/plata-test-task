@@ -18,6 +18,7 @@ const apiV1Prefix = "/api/v1"
 func NewRouter(
 	logger *slog.Logger, ready func(context.Context) error,
 	repo quotes.Repository, clk quotes.Clock, nudge chan<- struct{},
+	corsAllowedOrigins ...string,
 ) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(http.MethodGet+" /healthz", healthzHandler(logger))
@@ -27,5 +28,5 @@ func NewRouter(
 	mux.HandleFunc(http.MethodGet+" "+apiV1Prefix+"/quotes/updates/{id}", getQuotesUpdateHandler(logger, repo))
 	mux.HandleFunc(http.MethodGet+" "+apiV1Prefix+"/quotes/latest", getQuotesLatestHandler(logger, repo))
 
-	return corsMiddleware(requestIDMiddleware(recoverMiddleware(logger, loggingMiddleware(logger, mux))))
+	return corsMiddleware(corsAllowedOrigins, requestIDMiddleware(recoverMiddleware(logger, loggingMiddleware(logger, mux))))
 }

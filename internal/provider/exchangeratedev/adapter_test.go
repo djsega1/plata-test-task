@@ -200,6 +200,7 @@ func TestGetCurrencyRate_ClassifiedProviderErrors(t *testing.T) {
 		{"unsupported_base", http.StatusUnprocessableEntity, quotes.UnsupportedPairError, false},
 		{"missing_parameter", http.StatusBadRequest, quotes.InvalidRequestError, false},
 		{"invalid_api_key", http.StatusUnauthorized, quotes.AuthError, false},
+		{"quota_exceeded", http.StatusForbidden, quotes.QuotaExceededError, false},
 		{"service_unavailable", http.StatusServiceUnavailable, quotes.ProviderUnavailableError, true},
 		{"auth_unavailable", http.StatusServiceUnavailable, quotes.ProviderUnavailableError, true},
 	}

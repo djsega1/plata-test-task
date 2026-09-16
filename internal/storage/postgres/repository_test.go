@@ -306,6 +306,50 @@ func TestCompleteSuccess_DedupsSameQuotedAt(t *testing.T) {
 	assert.Equal(t, *q1, *q2)
 }
 
+// TestCompleteSuccess_ConcurrentSameQuotedAtWritesOnce covers N concurrent
+// CompleteSuccess calls racing on the same (provider, base, quote,
+// quoted_at) tuple: upsertQuote must let one insert and hand the rest the
+// same id back via its fallback SELECT.
+func TestCompleteSuccess_ConcurrentSameQuotedAtWritesOnce(t *testing.T) {
+	pool := newTestPool(t)
+	repo := postgres.NewRepository(pool)
+	ctx := t.Context()
+	now := testNow
+	pair := testPair(t)
+	rate := testRate(t, now)
+
+	const numRequests = 20
+	ids := make([]uuid.UUID, numRequests)
+	for i := range numRequests {
+		req := domainquotes.NewCurrencyRateUpdateRequest(pair, now)
+		require.NoError(t, repo.CreateUpdateRequest(ctx, req, ""))
+		ids[i] = req.ID
+	}
+	_, err := repo.ClaimBatch(ctx, numRequests, now, now.Add(-time.Hour))
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		wg.Go(func() {
+			assert.NoError(t, repo.CompleteSuccess(ctx, id, pair, rate, now))
+		})
+	}
+	wg.Wait()
+
+	var quoteCount int
+	require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM quotes").Scan(&quoteCount))
+	assert.Equal(t, 1, quoteCount, "concurrent inserts of the identical rate must still dedup to one journal row")
+
+	quoteIDs := map[int64]bool{}
+	for _, id := range ids {
+		var quoteID *int64
+		require.NoError(t, pool.QueryRow(ctx, "SELECT quote_id FROM quote_updates WHERE id = $1", id).Scan(&quoteID))
+		require.NotNil(t, quoteID, "id %s must have resolved to a quote row", id)
+		quoteIDs[*quoteID] = true
+	}
+	assert.Len(t, quoteIDs, 1, "every concurrent caller must point at the same journal row")
+}
+
 func TestCompleteSuccess_RequiresInProgress(t *testing.T) {
 	pool := newTestPool(t)
 	repo := postgres.NewRepository(pool)

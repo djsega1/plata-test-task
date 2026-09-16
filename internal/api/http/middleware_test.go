@@ -123,7 +123,7 @@ func TestRecoverMiddleware(t *testing.T) {
 }
 
 func TestCORSMiddlewareReflectsOrigin(t *testing.T) {
-	handler := corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := corsMiddleware(nil, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -144,7 +144,7 @@ func TestCORSMiddlewareReflectsOrigin(t *testing.T) {
 }
 
 func TestCORSMiddlewareNoOriginHeaderIsUnaffected(t *testing.T) {
-	handler := corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := corsMiddleware(nil, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -159,7 +159,7 @@ func TestCORSMiddlewareNoOriginHeaderIsUnaffected(t *testing.T) {
 
 func TestCORSMiddlewareAnswersPreflightWithoutReachingHandler(t *testing.T) {
 	called := false
-	handler := corsMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	handler := corsMiddleware(nil, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		called = true
 	}))
 
@@ -180,6 +180,41 @@ func TestCORSMiddlewareAnswersPreflightWithoutReachingHandler(t *testing.T) {
 	}
 	if got := rec.Header().Get("Access-Control-Allow-Headers"); got == "" {
 		t.Error("Access-Control-Allow-Headers missing from preflight response")
+	}
+}
+
+// TestCORSMiddlewareAllowListRejectsUnlistedOrigin: with an allow-list
+// configured, an Origin outside it must not be reflected.
+func TestCORSMiddlewareAllowListRejectsUnlistedOrigin(t *testing.T) {
+	handler := corsMiddleware([]string{"https://allowed.example"}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/quotes/latest", nil)
+	req.Header.Set("Origin", "https://evil.example")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want empty for an origin outside the allow-list", got)
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d (a disallowed Origin still reaches the handler, just without CORS headers)", rec.Code, http.StatusOK)
+	}
+}
+
+func TestCORSMiddlewareAllowListAcceptsListedOrigin(t *testing.T) {
+	handler := corsMiddleware([]string{"https://allowed.example"}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/quotes/latest", nil)
+	req.Header.Set("Origin", "https://allowed.example")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://allowed.example" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want the listed origin reflected back", got)
 	}
 }
 

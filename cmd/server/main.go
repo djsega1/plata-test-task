@@ -58,6 +58,7 @@ func run() int {
 	limiter := quotes.NewRateLimiter(cfg.RateLimitPerMinute, cfg.RateLimitPerHour)
 	worker := quotes.NewWorker(
 		repo, provider, sysClock, limiter, logger, cfg.DispatchBaseBackoff, cfg.DispatchMaxBackoff, cfg.DispatchMaxAttempts,
+		cfg.DispatchMaxLifetime, cfg.DispatchPassTimeout,
 	)
 	dispatcher := quotes.NewDispatcher(
 		repo, sysClock, worker, logger, cfg.DispatchBatchSize, cfg.DispatchPoolSize,
@@ -97,7 +98,7 @@ func run() int {
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           apihttp.NewRouter(logger, pool.Ping, repo, sysClock, nudge),
+		Handler:           apihttp.NewRouter(logger, pool.Ping, repo, sysClock, nudge, cfg.CORSAllowedOrigins...),
 		ReadTimeout:       cfg.ReadTimeout,
 		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
 		WriteTimeout:      cfg.WriteTimeout,

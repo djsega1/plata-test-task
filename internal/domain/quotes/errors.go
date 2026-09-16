@@ -12,6 +12,7 @@ const (
 	InvalidRequestError      CurrencyRateErrorCode = "invalid_request"      // bad request, not retryable
 	UnsupportedPairError     CurrencyRateErrorCode = "unsupported_pair"     // pair not supported, not retryable
 	AuthError                CurrencyRateErrorCode = "auth_error"           // bad key or forbidden, not retryable
+	QuotaExceededError       CurrencyRateErrorCode = "quota_exceeded"       // plan quota spent, not retryable
 	RateLimitedError         CurrencyRateErrorCode = "rate_limited"         // too many requests, retryable
 	ProviderUnavailableError CurrencyRateErrorCode = "provider_unavailable" // upstream down, retryable
 
@@ -32,7 +33,7 @@ const (
 
 func (c CurrencyRateErrorCode) Valid() bool {
 	return slices.Contains([]CurrencyRateErrorCode{
-		InvalidRequestError, UnsupportedPairError, AuthError, RateLimitedError,
+		InvalidRequestError, UnsupportedPairError, AuthError, QuotaExceededError, RateLimitedError,
 		ProviderUnavailableError, UnclassifiedProviderError, MalformedResponseError, InternalError,
 	}, c)
 }

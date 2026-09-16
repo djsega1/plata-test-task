@@ -50,10 +50,13 @@ func (d *Dispatcher) ClaimAndDispatch(ctx context.Context) (full bool, err error
 	}
 	d.logger.Debug("claimed batch", "count", len(claimed), "batch_size", d.batchSize, "full", len(claimed) == d.batchSize)
 
-	g, gctx := errgroup.WithContext(ctx)
+	// Plain errgroup.Group, not errgroup.WithContext: every Go func below
+	// always returns nil, so there's no error for an auto-cancelling
+	// context to react to. Used only for SetLimit's bounded pool.
+	var g errgroup.Group
 	g.SetLimit(d.poolSize)
 	for _, req := range claimed {
-		g.Go(func() (_ error) {
+		g.Go(func() error {
 			// errgroup doesn't recover panics; one bad row must not take
 			// down the rest of the batch. Same handling as a Process error:
 			// log it, leave the row in_progress for the reaper.
@@ -62,13 +65,14 @@ func (d *Dispatcher) ClaimAndDispatch(ctx context.Context) (full bool, err error
 					d.logger.Error("panic processing update", "id", req.ID, "pair", req.Pair.String(), "panic", r)
 				}
 			}()
-			if err := d.worker.Process(gctx, req); err != nil {
+			if err := d.worker.Process(ctx, req); err != nil {
 				d.logger.Error("process update", "id", req.ID, "pair", req.Pair.String(), "error", err)
 			}
 			return nil
 		})
 	}
-	return len(claimed) == d.batchSize, g.Wait()
+	_ = g.Wait() // every Go func above always returns nil; this just drains the pool.
+	return len(claimed) == d.batchSize, nil
 }
 
 // runPassRecovered wraps ClaimAndDispatch, turning a panic into an error.

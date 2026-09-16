@@ -212,7 +212,7 @@ var errorClassification = map[string]errorClass{
 	"forbidden":         {domainquotes.AuthError, false},
 	"rate_limited":      {domainquotes.RateLimitedError, true},
 	"ip_rate_limited":   {domainquotes.RateLimitedError, true},
-	"quota_exceeded":    {domainquotes.AuthError, false}, // monthly quota, won't reset soon
+	"quota_exceeded":    {domainquotes.QuotaExceededError, false}, // monthly quota, won't reset soon — not an auth problem
 	"quota_unavailable": {domainquotes.ProviderUnavailableError, true},
 }
 

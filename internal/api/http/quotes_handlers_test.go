@@ -205,9 +205,8 @@ func TestPostQuotesUpdates_IdempotencyConflict(t *testing.T) {
 }
 
 // TestPostQuotesUpdates_LogsRequestIDWithUpdateID covers the one log line
-// design.md's request_id tracing relies on: request_id and update_id
-// logged together, so a request_id from an access log or client report can
-// be traced forward into the worker's update_id-keyed logs.
+// that ties request_id to update_id, so a request_id from an access log or
+// client report can be traced forward into the worker's update_id-keyed logs.
 func TestPostQuotesUpdates_LogsRequestIDWithUpdateID(t *testing.T) {
 	var buf bytes.Buffer
 	logger := bufferLogger(&buf)
@@ -330,7 +329,11 @@ func TestGetQuotesUpdate_Failed(t *testing.T) {
 	assert.Equal(t, 1, body.Attempts)
 	require.NotNil(t, body.Error)
 	assert.Equal(t, "unsupported_pair", body.Error.Code)
-	assert.Equal(t, "no rate for pair", body.Error.Message)
+	// The wire message is a fixed, safe-by-code string, not the raw
+	// error_message stored in the row (see dto.go's safeErrorMessage) — a
+	// raw message can carry internal detail (URLs, dial errors) that
+	// shouldn't reach a client.
+	assert.Equal(t, "no rate available for this pair", body.Error.Message)
 }
 
 func TestGetQuotesUpdate_NotFound(t *testing.T) {
@@ -430,7 +433,7 @@ func TestEndToEnd_PostPollLatest(t *testing.T) {
 	router := NewRouter(discardLogger(), alwaysReady, repo, fc, nudge)
 
 	provider := fake.NewFakeRateProvider(fc, 0, 0, 0, time.Minute)
-	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second, time.Minute, 5)
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second, time.Minute, 5, time.Hour, time.Minute)
 	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), 10, 4, time.Hour, time.Minute)
 
 	postRec := doJSON(t, router, http.MethodPost, "/api/v1/quotes/updates", map[string]string{"pair": "EUR/MXN"})
