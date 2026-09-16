@@ -1,6 +1,8 @@
 package quotes_test
 
 import (
+	"bytes"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -34,7 +36,7 @@ func TestWorker_Process_PendingToSucceeded(t *testing.T) {
 	provider := &countingProvider{rate: quotes.ProviderQuote{
 		Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now(),
 	}}
-	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), time.Second)
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second)
 
 	req := claimOne(t, repo, pair, fc.Now())
 	require.NoError(t, worker.Process(t.Context(), req))
@@ -56,7 +58,7 @@ func TestWorker_Process_ReusesFreshQuoteWithoutCallingProvider(t *testing.T) {
 	provider := &countingProvider{rate: quotes.ProviderQuote{
 		Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now(),
 	}}
-	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), time.Second)
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second)
 
 	first := claimOne(t, repo, pair, fc.Now())
 	require.NoError(t, worker.Process(t.Context(), first))
@@ -84,7 +86,7 @@ func TestWorker_Process_RetryableFailureDefersWithBackoff(t *testing.T) {
 	provider := &countingProvider{err: domainquotes.NewCurrencyRateError(
 		domainquotes.ProviderUnavailableError, "upstream down", true, 30*time.Second, "",
 	)}
-	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), 10*time.Second)
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), 10*time.Second)
 
 	req := claimOne(t, repo, pair, fc.Now())
 	require.NoError(t, worker.Process(t.Context(), req))
@@ -112,7 +114,7 @@ func TestWorker_Process_PermanentFailureFails(t *testing.T) {
 	provider := &countingProvider{err: domainquotes.NewCurrencyRateError(
 		domainquotes.UnsupportedPairError, "no rate for pair", false, 0, "",
 	)}
-	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), time.Second)
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second)
 
 	req := claimOne(t, repo, pair, fc.Now())
 	require.NoError(t, worker.Process(t.Context(), req))
@@ -134,7 +136,7 @@ func TestWorker_Process_RateLimitedDefersWithoutCallingProvider(t *testing.T) {
 	ok, _ := limiter.Allow(fc.Now()) // consumes the only slot
 	require.True(t, ok)
 
-	worker := quotes.NewWorker(repo, provider, fc, limiter, time.Second)
+	worker := quotes.NewWorker(repo, provider, fc, limiter, discardLogger(), time.Second)
 
 	req := claimOne(t, repo, pair, fc.Now())
 	require.NoError(t, worker.Process(t.Context(), req))
@@ -146,6 +148,85 @@ func TestWorker_Process_RateLimitedDefersWithoutCallingProvider(t *testing.T) {
 	assert.Equal(t, domainquotes.StatusPending, gotReq.Status, "deferred, not failed")
 }
 
+func TestWorker_Process_LogsFetchedQuote(t *testing.T) {
+	repo := memory.NewRepository()
+	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	pair := testPair(t)
+
+	var buf bytes.Buffer
+	provider := &countingProvider{rate: quotes.ProviderQuote{
+		Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now(),
+	}}
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), bufferLogger(&buf, slog.LevelInfo), time.Second)
+
+	req := claimOne(t, repo, pair, fc.Now())
+	require.NoError(t, worker.Process(t.Context(), req))
+
+	line := findLogLine(t, decodeLogLines(t, &buf), "fetched quote from provider")
+	assert.Equal(t, pair.String(), line["pair"])
+	assert.Equal(t, "live", line["quality"])
+}
+
+func TestWorker_Process_LogsReusedQuoteAtDebug(t *testing.T) {
+	repo := memory.NewRepository()
+	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	pair := testPair(t)
+
+	provider := &countingProvider{rate: quotes.ProviderQuote{
+		Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now(),
+	}}
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second)
+	first := claimOne(t, repo, pair, fc.Now())
+	require.NoError(t, worker.Process(t.Context(), first))
+
+	var buf bytes.Buffer
+	worker2 := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), bufferLogger(&buf, slog.LevelDebug), time.Second)
+	fc.Advance(time.Second) // still inside the 1-minute StaleAfter window
+	second := claimOne(t, repo, pair, fc.Now())
+	require.NoError(t, worker2.Process(t.Context(), second))
+
+	line := findLogLine(t, decodeLogLines(t, &buf), "reusing cached quote")
+	assert.Equal(t, pair.String(), line["pair"])
+}
+
+func TestWorker_Process_LogsRetryableFailureAtWarn(t *testing.T) {
+	repo := memory.NewRepository()
+	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	pair := testPair(t)
+
+	var buf bytes.Buffer
+	provider := &countingProvider{err: domainquotes.NewCurrencyRateError(
+		domainquotes.ProviderUnavailableError, "upstream down", true, 30*time.Second, "",
+	)}
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), bufferLogger(&buf, slog.LevelInfo), 10*time.Second)
+
+	req := claimOne(t, repo, pair, fc.Now())
+	require.NoError(t, worker.Process(t.Context(), req))
+
+	line := findLogLine(t, decodeLogLines(t, &buf), "update deferred for retry")
+	assert.Equal(t, "WARN", line["level"])
+	assert.Equal(t, pair.String(), line["pair"])
+}
+
+func TestWorker_Process_LogsPermanentFailureAtError(t *testing.T) {
+	repo := memory.NewRepository()
+	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	pair := testPair(t)
+
+	var buf bytes.Buffer
+	provider := &countingProvider{err: domainquotes.NewCurrencyRateError(
+		domainquotes.UnsupportedPairError, "no rate for pair", false, 0, "",
+	)}
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), bufferLogger(&buf, slog.LevelInfo), time.Second)
+
+	req := claimOne(t, repo, pair, fc.Now())
+	require.NoError(t, worker.Process(t.Context(), req))
+
+	line := findLogLine(t, decodeLogLines(t, &buf), "update failed permanently")
+	assert.Equal(t, "ERROR", line["level"])
+	assert.Equal(t, pair.String(), line["pair"])
+}
+
 func TestWorker_Process_InvalidRateFromProviderFails(t *testing.T) {
 	repo := memory.NewRepository()
 	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
@@ -154,7 +235,7 @@ func TestWorker_Process_InvalidRateFromProviderFails(t *testing.T) {
 	provider := &countingProvider{rate: quotes.ProviderQuote{
 		Value: decimal.Zero, Quality: "live", QuotedAt: fc.Now(),
 	}}
-	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), time.Second)
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second)
 
 	req := claimOne(t, repo, pair, fc.Now())
 	require.NoError(t, worker.Process(t.Context(), req))

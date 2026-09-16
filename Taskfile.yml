@@ -63,3 +63,29 @@ tasks:
       - task: vet
       - task: lint
       - task: test
+
+  docker:up:
+    desc: Build and start the full stack (Postgres + service + OpenAPI UI) in the background
+    cmds:
+      - docker compose up -d --build
+      - 'echo "Swagger UI: http://localhost:8081"'
+
+  docker:down:
+    desc: Stop the stack (add -v via `docker compose down -v` to also drop the database volume)
+    cmds:
+      - docker compose down
+
+  docker:logs:
+    desc: Follow the app container's logs
+    cmds:
+      - docker compose logs -f app
+
+  smoke:
+    desc: Run the end-to-end smoke test against an already-running stack (see docker:up)
+    cmds:
+      - bash scripts/smoke.sh
+
+  throughput:
+    desc: Measure background-pipeline throughput (quote_updates/10s) against an already-running stack
+    cmds:
+      - bash scripts/throughput.sh

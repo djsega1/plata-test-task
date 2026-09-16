@@ -351,7 +351,7 @@ func TestEndToEnd_PostPollLatest(t *testing.T) {
 	router := NewRouter(discardLogger(), alwaysReady, repo, fc, nudge)
 
 	provider := fake.NewFakeRateProvider(fc, 0, 0, 0, time.Minute)
-	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), time.Second)
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second)
 	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), 10, 4, time.Hour)
 
 	postRec := doJSON(t, router, http.MethodPost, "/api/v1/quotes/updates", map[string]string{"pair": "EUR/MXN"})
@@ -369,7 +369,8 @@ func TestEndToEnd_PostPollLatest(t *testing.T) {
 	require.Equal(t, http.StatusOK, pollRec.Code)
 	assert.Equal(t, "pending", decodeBody[wireQuote](t, pollRec).Status)
 
-	require.NoError(t, dispatcher.ClaimAndDispatch(t.Context()))
+	_, err := dispatcher.ClaimAndDispatch(t.Context())
+	require.NoError(t, err)
 
 	pollRec2 := doJSON(t, router, http.MethodGet, "/api/v1/quotes/updates/"+created.UpdateID, nil)
 	require.Equal(t, http.StatusOK, pollRec2.Code)

@@ -1,0 +1,7 @@
+.git
+.claude
+.vscode
+docs
+README.md
+*.md
+.env

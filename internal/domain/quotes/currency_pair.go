@@ -10,8 +10,8 @@ import (
 // shapes that ParseCurrencyPair/NewCurrencyPair used to both report as the
 // same opaque error: a string that isn't even shaped like a pair, versus a
 // well-formed pair this service just doesn't support. The api/http layer
-// maps them to 400 and 422 respectively (docs/design.md §4) — a malformed
-// shape is a bad request, not a rejected allow-list lookup.
+// maps them to 400 and 422 respectively — a malformed shape is a bad
+// request, not a rejected allow-list lookup.
 var (
 	ErrMalformedPair  = errors.New("pair is in wrong format")
 	ErrPairNotAllowed = errors.New("pair is outside the allow-list")

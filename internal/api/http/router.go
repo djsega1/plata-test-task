@@ -8,8 +8,8 @@ import (
 	"github.com/djsega1/plata-test-task/internal/usecase/quotes"
 )
 
-// apiV1Prefix is docs/design.md §4's base path for the business endpoints;
-// /healthz and /readyz below are deliberately outside it.
+// apiV1Prefix is the base path for the business endpoints; /healthz and
+// /readyz below are deliberately outside it.
 const apiV1Prefix = "/api/v1"
 
 // NewRouter wires every HTTP route. nudge is passed straight through to the
@@ -27,5 +27,5 @@ func NewRouter(
 	mux.HandleFunc(http.MethodGet+" "+apiV1Prefix+"/quotes/updates/{id}", getQuotesUpdateHandler(logger, repo))
 	mux.HandleFunc(http.MethodGet+" "+apiV1Prefix+"/quotes/latest", getQuotesLatestHandler(logger, repo))
 
-	return recoverMiddleware(logger, loggingMiddleware(logger, mux))
+	return corsMiddleware(recoverMiddleware(logger, loggingMiddleware(logger, mux)))
 }

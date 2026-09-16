@@ -54,19 +54,18 @@ type Config struct {
 	// it doesn't otherwise recognize.
 	QuoteTTL time.Duration
 	// RateLimitPerMinute/RateLimitPerHour bound the dispatcher's own
-	// outbound calls to the configured provider (docs/design.md §2).
+	// outbound calls to the configured provider.
 	RateLimitPerMinute int
 	RateLimitPerHour   int
 
 	// DispatchTickInterval drives cmd/server's real ticker — the only
 	// mechanism that picks up backoff-deferred work and work created by
-	// another replica (docs/design.md §3). A POST's nudge covers the
-	// common case; the tick is the fallback.
+	// another replica. A POST's nudge covers the common case; the tick is
+	// the fallback.
 	DispatchTickInterval time.Duration
 	// DispatchBatchSize is ClaimBatch's limit per pass.
 	DispatchBatchSize int
-	// DispatchPoolSize bounds requests in flight at once across a batch —
-	// docs/design.md's circuit-breaker note assumes 8 workers cover 6 pairs.
+	// DispatchPoolSize bounds requests in flight at once across a batch.
 	DispatchPoolSize int
 	// DispatchVisibilityTimeout is how long a claimed row may stay
 	// in_progress before the reaper (folded into ClaimBatch) reclaims it.
@@ -75,6 +74,27 @@ type Config struct {
 	// DispatchBaseBackoff is Worker's floor retry delay — raised to a
 	// failure's own Retry-After when that's longer, then jittered.
 	DispatchBaseBackoff time.Duration
+
+	// ProviderHTTPTimeout bounds internal/provider/exchangeratedev's HTTP
+	// client (only used when Provider is exchangeratedev).
+	ProviderHTTPTimeout time.Duration
+	// ProviderHTTPMaxIdleConnsPerHost/IdleConnTimeout tune that same
+	// client's connection reuse against the single upstream host — see
+	// pkg/httpclient, which cmd/server builds the client through.
+	ProviderHTTPMaxIdleConnsPerHost int
+	ProviderHTTPIdleConnTimeout     time.Duration
+	// FakeProviderMinDelay/MaxDelay simulate upstream latency when Provider
+	// is fake; both zero (the default) matches cmd/server's production
+	// wiring, which leaves them at zero on purpose — RateLimiter is the
+	// single source of quota truth for the real dispatcher — but a demo
+	// run can opt into some delay to make the async nature of the API
+	// visible.
+	FakeProviderMinDelay time.Duration
+	FakeProviderMaxDelay time.Duration
+	// FakeProviderRPMQuota, if positive, makes the fake provider enforce
+	// its own per-minute quota independently of RateLimitPerMinute above.
+	// 0 (the default) disables it.
+	FakeProviderRPMQuota int
 }
 
 const (
@@ -96,6 +116,19 @@ const (
 	defaultDispatchPoolSize          = 8
 	defaultDispatchVisibilityTimeout = 30 * time.Second
 	defaultDispatchBaseBackoff       = 5 * time.Second
+
+	defaultProviderHTTPTimeout = 5 * time.Second
+	// defaultProviderHTTPMaxIdleConnsPerHost matches DispatchPoolSize's
+	// default: that many workers is the most concurrent outbound calls
+	// this service ever makes at once, so it's also the most connections
+	// to the same upstream host worth keeping idle for reuse.
+	defaultProviderHTTPMaxIdleConnsPerHost = 8
+	// defaultProviderHTTPIdleConnTimeout matches net/http's own
+	// DefaultTransport default (90s) — no evidence yet that this
+	// workload needs a different one.
+	defaultProviderHTTPIdleConnTimeout = 90 * time.Second
+	// FakeProviderMinDelay/MaxDelay/RPMQuota default to zero (Go's zero
+	// value) — no named constant needed for "off".
 )
 
 // Load builds a Config from environment variables, then applies args as
@@ -120,6 +153,10 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		DispatchPoolSize:          defaultDispatchPoolSize,
 		DispatchVisibilityTimeout: defaultDispatchVisibilityTimeout,
 		DispatchBaseBackoff:       defaultDispatchBaseBackoff,
+
+		ProviderHTTPTimeout:             defaultProviderHTTPTimeout,
+		ProviderHTTPMaxIdleConnsPerHost: defaultProviderHTTPMaxIdleConnsPerHost,
+		ProviderHTTPIdleConnTimeout:     defaultProviderHTTPIdleConnTimeout,
 	}
 
 	if v := getenv("HTTP_ADDR"); v != "" {
@@ -140,8 +177,22 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		{"DISPATCH_TICK_INTERVAL", &cfg.DispatchTickInterval},
 		{"DISPATCH_VISIBILITY_TIMEOUT", &cfg.DispatchVisibilityTimeout},
 		{"DISPATCH_BASE_BACKOFF", &cfg.DispatchBaseBackoff},
+		{"PROVIDER_HTTP_TIMEOUT", &cfg.ProviderHTTPTimeout},
+		{"PROVIDER_HTTP_IDLE_CONN_TIMEOUT", &cfg.ProviderHTTPIdleConnTimeout},
 	} {
 		if *d.dst, err = durationEnv(getenv, d.name, *d.dst); err != nil {
+			return Config{}, err
+		}
+	}
+
+	for _, d := range []struct {
+		name string
+		dst  *time.Duration
+	}{
+		{"FAKE_PROVIDER_MIN_DELAY", &cfg.FakeProviderMinDelay},
+		{"FAKE_PROVIDER_MAX_DELAY", &cfg.FakeProviderMaxDelay},
+	} {
+		if *d.dst, err = nonNegativeDurationEnv(getenv, d.name, *d.dst); err != nil {
 			return Config{}, err
 		}
 	}
@@ -154,10 +205,15 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		{"RATE_LIMIT_PER_HOUR", &cfg.RateLimitPerHour},
 		{"DISPATCH_BATCH_SIZE", &cfg.DispatchBatchSize},
 		{"DISPATCH_POOL_SIZE", &cfg.DispatchPoolSize},
+		{"PROVIDER_HTTP_MAX_IDLE_CONNS_PER_HOST", &cfg.ProviderHTTPMaxIdleConnsPerHost},
 	} {
 		if *n.dst, err = intEnv(getenv, n.name, *n.dst); err != nil {
 			return Config{}, err
 		}
+	}
+
+	if cfg.FakeProviderRPMQuota, err = nonNegativeIntEnv(getenv, "FAKE_PROVIDER_RPM_QUOTA", cfg.FakeProviderRPMQuota); err != nil {
+		return Config{}, err
 	}
 
 	if v := getenv("LOG_LEVEL"); v != "" {
@@ -212,6 +268,40 @@ func durationEnv(getenv func(string) string, name string, def time.Duration) (ti
 		return 0, fmt.Errorf("config: %s must be positive, got %q", name, v)
 	}
 	return d, nil
+}
+
+// nonNegativeDurationEnv is durationEnv but also accepts zero — for a
+// duration where zero is a meaningful "disabled", not a misconfiguration.
+func nonNegativeDurationEnv(getenv func(string) string, name string, def time.Duration) (time.Duration, error) {
+	v := getenv(name)
+	if v == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("config: invalid %s %q: %w", name, v, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("config: %s must not be negative, got %q", name, v)
+	}
+	return d, nil
+}
+
+// nonNegativeIntEnv is intEnv but also accepts zero — for a count where
+// zero is a meaningful "disabled", not a misconfiguration.
+func nonNegativeIntEnv(getenv func(string) string, name string, def int) (int, error) {
+	v := getenv(name)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("config: invalid %s %q: %w", name, v, err)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("config: %s must not be negative, got %q", name, v)
+	}
+	return n, nil
 }
 
 // intEnv parses name as a positive int, or returns def if unset.

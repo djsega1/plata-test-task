@@ -2,6 +2,7 @@ package quotes
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -31,17 +32,24 @@ func NewDispatcher(
 }
 
 // ClaimAndDispatch claims one batch and runs it with at most poolSize
-// requests in flight at once. A Worker.Process error is infrastructural
-// (see Worker.Process) — it's logged, not propagated, so one bad row
-// doesn't stop the rest of the batch.
-func (d *Dispatcher) ClaimAndDispatch(ctx context.Context) error {
+// requests in flight at once, reporting whether the claimed batch was full
+// (== batchSize) — Run uses that to decide whether to claim again
+// immediately instead of waiting for the next nudge/tick (see Run's
+// comment). A Worker.Process error is infrastructural (see Worker.Process)
+// — it's logged, not propagated, so one bad row doesn't stop the rest of
+// the batch.
+func (d *Dispatcher) ClaimAndDispatch(ctx context.Context) (full bool, err error) {
 	now := d.clock.Now()
 	visibleSince := now.Add(-d.visibilityTimeout)
 
 	claimed, err := d.repo.ClaimBatch(ctx, d.batchSize, now, visibleSince)
 	if err != nil {
-		return err
+		return false, err
 	}
+	if len(claimed) == 0 {
+		return false, nil
+	}
+	d.logger.Debug("claimed batch", "count", len(claimed), "batch_size", d.batchSize, "full", len(claimed) == d.batchSize)
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(d.poolSize)
@@ -65,7 +73,26 @@ func (d *Dispatcher) ClaimAndDispatch(ctx context.Context) error {
 			return nil
 		})
 	}
-	return g.Wait()
+	return len(claimed) == d.batchSize, g.Wait()
+}
+
+// runPassRecovered wraps ClaimAndDispatch, turning a panic into an error.
+// ClaimAndDispatch's own errgroup already recovers a panic inside one row's
+// Worker.Process, but ClaimBatch itself (the repository call, before any
+// row-level recover is even in place) is not covered by that — a panic
+// there would otherwise propagate out of Run's goroutine uncaught, and an
+// unrecovered panic in any goroutine crashes the whole process, HTTP
+// server and all, not just this background loop. Only Run calls this;
+// ClaimAndDispatch stays panic-propagating for direct callers (tests, or
+// any future caller that wants to know about a real bug immediately
+// rather than see it downgraded to a log line).
+func (d *Dispatcher) runPassRecovered(ctx context.Context) (full bool, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic in claim and dispatch: %v", r)
+		}
+	}()
+	return d.ClaimAndDispatch(ctx)
 }
 
 // Run drives ClaimAndDispatch from three independent triggers: a
@@ -76,7 +103,7 @@ func (d *Dispatcher) ClaimAndDispatch(ctx context.Context) error {
 // are passed in as plain channels precisely so a caller could still drive
 // this loop deterministically if it ever needed to.
 //
-// ctx only gates whether another pass is allowed to *start*: ClaimAndDispatch
+// ctx only gates whether another pass is allowed to *start*: each pass
 // itself runs on context.WithoutCancel(ctx), so a pass already in flight when
 // ctx is cancelled keeps running to completion instead of having its
 // in-progress upstream calls aborted out from under it (the caller, e.g.
@@ -84,6 +111,12 @@ func (d *Dispatcher) ClaimAndDispatch(ctx context.Context) error {
 // this goroutine to exit is enough to let claimed rows finish). Each
 // upstream call still carries its own timeout, so this can't hang shutdown
 // forever.
+//
+// A full batch (claimed == batchSize) means more work is likely still
+// queued right behind it, so Run keeps claiming immediately instead of
+// going back to wait for the next nudge/tick. Without this, backlog drain
+// is capped at batchSize/tick-interval regardless of how much work is
+// actually queued or how much pool capacity sits idle.
 func (d *Dispatcher) Run(ctx context.Context, nudge <-chan struct{}, tick <-chan time.Time) {
 	for {
 		select {
@@ -92,8 +125,20 @@ func (d *Dispatcher) Run(ctx context.Context, nudge <-chan struct{}, tick <-chan
 		case <-nudge:
 		case <-tick:
 		}
-		if err := d.ClaimAndDispatch(context.WithoutCancel(ctx)); err != nil {
-			d.logger.Error("claim and dispatch", "error", err)
+		for {
+			full, err := d.runPassRecovered(context.WithoutCancel(ctx))
+			if err != nil {
+				d.logger.Error("claim and dispatch", "error", err)
+				break
+			}
+			if !full {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 		}
 	}
 }

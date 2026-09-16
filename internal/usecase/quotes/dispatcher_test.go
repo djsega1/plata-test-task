@@ -1,10 +1,13 @@
 package quotes_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -21,6 +24,44 @@ import (
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(io.Discard, nil))
+}
+
+// bufferLogger is discardLogger, but capturing JSON log lines into buf for
+// assertions — at level so a test can capture Debug-level lines too
+// (slog's own default level is Info).
+func bufferLogger(buf *bytes.Buffer, level slog.Level) *slog.Logger {
+	return slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: level}))
+}
+
+// decodeLogLines parses buf's newline-delimited JSON log records into maps.
+func decodeLogLines(t *testing.T, buf *bytes.Buffer) []map[string]any {
+	t.Helper()
+
+	var lines []map[string]any
+	for raw := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
+		if raw == "" {
+			continue
+		}
+		var line map[string]any
+		if err := json.Unmarshal([]byte(raw), &line); err != nil {
+			t.Fatalf("decode log line %q: %v", raw, err)
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+// findLogLine returns the first log line whose "msg" matches, failing the
+// test if none does.
+func findLogLine(t *testing.T, lines []map[string]any, msg string) map[string]any {
+	t.Helper()
+	for _, line := range lines {
+		if line["msg"] == msg {
+			return line
+		}
+	}
+	t.Fatalf("no log line with msg %q among %d lines: %v", msg, len(lines), lines)
+	return nil
 }
 
 // allPairs is every ordered pair the allow-list (USD, EUR, MXN) admits.
@@ -51,10 +92,11 @@ func TestDispatcher_ClaimAndDispatch_PendingToSucceeded(t *testing.T) {
 	provider := &countingProvider{rate: quotes.ProviderQuote{
 		Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now(),
 	}}
-	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), time.Second)
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second)
 	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), 10, 4, time.Hour)
 
-	require.NoError(t, dispatcher.ClaimAndDispatch(t.Context()))
+	_, err := dispatcher.ClaimAndDispatch(t.Context())
+	require.NoError(t, err)
 
 	got, err := quotes.GetLatest(t.Context(), repo, pair.String())
 	require.NoError(t, err)
@@ -82,11 +124,12 @@ func TestDispatcher_PanicInOneUpdateDoesNotStopTheBatch(t *testing.T) {
 		panicPair: &panicPair,
 		rate:      quotes.ProviderQuote{Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now()},
 	}
-	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), time.Second)
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second)
 	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), 10, 4, time.Hour)
 
 	require.NotPanics(t, func() {
-		assert.NoError(t, dispatcher.ClaimAndDispatch(t.Context()))
+		_, err := dispatcher.ClaimAndDispatch(t.Context())
+		assert.NoError(t, err)
 	})
 
 	gotOK, _, err := repo.GetUpdateByID(t.Context(), okReq.ID)
@@ -126,7 +169,7 @@ func TestDispatcher_SamePairSingleFlightsToOneProviderCall(t *testing.T) {
 		gate: make(chan struct{}),
 		rate: quotes.ProviderQuote{Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now()},
 	}
-	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), time.Second)
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second)
 
 	var ready, done sync.WaitGroup
 	ready.Add(numRequests)
@@ -199,11 +242,14 @@ func TestDispatcher_DifferentPairsRunConcurrently(t *testing.T) {
 		arrived: make(chan struct{}),
 		rate:    quotes.ProviderQuote{Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now()},
 	}
-	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), time.Second)
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second)
 	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), 10, 6, time.Hour)
 
 	done := make(chan error, 1)
-	go func() { done <- dispatcher.ClaimAndDispatch(context.Background()) }()
+	go func() {
+		_, err := dispatcher.ClaimAndDispatch(context.Background())
+		done <- err
+	}()
 
 	for range pairs {
 		select {
@@ -244,10 +290,11 @@ func TestDispatcher_ExhaustedBudgetDefersWithoutFailing(t *testing.T) {
 	ok, _ := limiter.Allow(fc.Now()) // consume the only slot before the dispatcher runs
 	require.True(t, ok)
 
-	worker := quotes.NewWorker(repo, provider, fc, limiter, time.Second)
+	worker := quotes.NewWorker(repo, provider, fc, limiter, discardLogger(), time.Second)
 	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), 10, 4, time.Hour)
 
-	require.NoError(t, dispatcher.ClaimAndDispatch(t.Context()))
+	_, err := dispatcher.ClaimAndDispatch(t.Context())
+	require.NoError(t, err)
 
 	assert.Equal(t, 0, provider.callCount())
 	gotReq, _, err := repo.GetUpdateByID(t.Context(), req.ID)
@@ -271,7 +318,7 @@ func TestDispatcher_Run(t *testing.T) {
 	provider := &countingProvider{rate: quotes.ProviderQuote{
 		Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now(),
 	}}
-	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), time.Second)
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second)
 	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), 10, 4, time.Hour)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -304,6 +351,40 @@ func TestDispatcher_Run(t *testing.T) {
 	}
 }
 
+// panicOnClaimBatchRepository panics from ClaimBatch specifically — unlike
+// a panic inside one claimed row's Worker.Process (already covered by
+// TestDispatcher_PanicInOneUpdateDoesNotStopTheBatch), nothing recovers a
+// panic here before this fix. Embeds a nil Repository: every method but
+// ClaimBatch is unused by the one test that constructs this.
+type panicOnClaimBatchRepository struct {
+	quotes.Repository
+}
+
+func (panicOnClaimBatchRepository) ClaimBatch(context.Context, int, time.Time, time.Time) ([]domainquotes.CurrencyRateUpdateRequest, error) {
+	panic("boom")
+}
+
+// TestDispatcher_Run_PanicInClaimBatchDoesNotCrashTheProcess guards Run
+// against a panic that isn't inside any claimed row's Worker.Process —
+// ClaimAndDispatch's errgroup only recovers those. An unrecovered panic in
+// this goroutine would otherwise crash the entire test binary (in
+// production, the entire server, HTTP included), so the real assertion
+// here is that the process is still alive at all: a second nudge only
+// succeeds once Run is back at its select after surviving the first.
+func TestDispatcher_Run_PanicInClaimBatchDoesNotCrashTheProcess(t *testing.T) {
+	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	worker := quotes.NewWorker(memory.NewRepository(), &countingProvider{}, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second)
+	dispatcher := quotes.NewDispatcher(panicOnClaimBatchRepository{}, fc, worker, discardLogger(), 10, 4, time.Hour)
+
+	nudge := make(chan struct{})
+	tick := make(chan time.Time)
+	go dispatcher.Run(t.Context(), nudge, tick)
+
+	sendOrFail(t, nudge, struct{}{}, "Run never became ready to receive the nudge")
+	sendOrFail(t, nudge, struct{}{},
+		"Run never recovered from the panic and returned to its select — the panic likely crashed the goroutine")
+}
+
 // TestDispatcher_Run_CancelDuringPassDoesNotAbortIt guards the bug found in
 // cmd/server/main.go's shutdown: the context Run passes into ClaimAndDispatch
 // must survive Run's own ctx being cancelled, so an in-flight pass finishes
@@ -326,7 +407,7 @@ func TestDispatcher_Run_CancelDuringPassDoesNotAbortIt(t *testing.T) {
 			Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now(),
 		},
 	}
-	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), time.Second)
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second)
 	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), 10, 4, time.Hour)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -368,6 +449,52 @@ func TestDispatcher_Run_CancelDuringPassDoesNotAbortIt(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, domainquotes.StatusSucceeded, gotReq.Status,
 		"a pass already in flight when ctx is cancelled must still complete, not be left in_progress")
+}
+
+// TestDispatcher_Run_FullBatchKeepsDrainingWithoutWaitingForNudgeOrTick
+// guards backlog drain when nothing keeps nudging: a full batch
+// (== batchSize claimed) means more work is likely still queued, so Run
+// must keep claiming immediately instead of waiting for the next
+// nudge/tick. Five pending requests against a batchSize of 2 means a
+// version that only claims once per nudge would leave three of them
+// pending after a single nudge; the fix must drain all five from that one
+// nudge alone.
+func TestDispatcher_Run_FullBatchKeepsDrainingWithoutWaitingForNudgeOrTick(t *testing.T) {
+	repo := memory.NewRepository()
+	fc := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	pairs := allPairs(t)
+
+	const numRequests = 5
+	reqs := make([]domainquotes.CurrencyRateUpdateRequest, numRequests)
+	for i := range reqs {
+		reqs[i] = domainquotes.NewCurrencyRateUpdateRequest(pairs[i%len(pairs)], fc.Now())
+		require.NoError(t, repo.CreateUpdateRequest(t.Context(), reqs[i], ""))
+	}
+
+	provider := &countingProvider{rate: quotes.ProviderQuote{
+		Value: decimal.RequireFromString("1.08"), Quality: "live", QuotedAt: fc.Now(),
+	}}
+	worker := quotes.NewWorker(repo, provider, fc, quotes.NewRateLimiter(0, 0), discardLogger(), time.Second)
+	const batchSize = 2
+	dispatcher := quotes.NewDispatcher(repo, fc, worker, discardLogger(), batchSize, batchSize, time.Hour)
+
+	nudge := make(chan struct{})
+	tick := make(chan time.Time)
+
+	go dispatcher.Run(t.Context(), nudge, tick)
+
+	sendOrFail(t, nudge, struct{}{}, "Run never became ready to receive the nudge")
+	// A second send only succeeds once Run is back at its outer select —
+	// with the fix, that happens only after every full batch has been
+	// drained (three passes: 2+2+1), not just the first one.
+	sendOrFail(t, nudge, struct{}{}, "Run never finished draining every full batch from the single nudge above")
+
+	for _, req := range reqs {
+		gotReq, _, err := repo.GetUpdateByID(t.Context(), req.ID)
+		require.NoError(t, err)
+		assert.Equal(t, domainquotes.StatusSucceeded, gotReq.Status,
+			"a single nudge must drain the whole backlog, not just one batchSize-sized slice of it")
+	}
 }
 
 // sendOrFail sends v on ch, failing the test instead of hanging forever if

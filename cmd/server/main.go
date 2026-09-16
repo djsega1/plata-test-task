@@ -54,7 +54,7 @@ func run() int {
 	repo := postgres.NewRepository(pool)
 	sysClock := clock.NewSystemClock()
 	limiter := quotes.NewRateLimiter(cfg.RateLimitPerMinute, cfg.RateLimitPerHour)
-	worker := quotes.NewWorker(repo, provider, sysClock, limiter, cfg.DispatchBaseBackoff)
+	worker := quotes.NewWorker(repo, provider, sysClock, limiter, logger, cfg.DispatchBaseBackoff)
 	dispatcher := quotes.NewDispatcher(
 		repo, sysClock, worker, logger, cfg.DispatchBatchSize, cfg.DispatchPoolSize, cfg.DispatchVisibilityTimeout,
 	)

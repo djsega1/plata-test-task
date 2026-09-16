@@ -1,0 +1,66 @@
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: quotes
+      POSTGRES_PASSWORD: quotes
+      POSTGRES_DB: quotes
+    volumes:
+      # PostgreSQL 18+ images store data under a major-version-specific
+      # subdirectory of /var/lib/postgresql itself, not .../data (see
+      # https://github.com/docker-library/postgres/pull/1259) — mounting at
+      # .../data errors out on startup.
+      - db-data:/var/lib/postgresql
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U quotes -d quotes" ]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    ports:
+      - "5432:5432"
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # DATABASE_URL/HTTP_ADDR are fixed: the app only ever talks to the db
+      # service above, on the port this compose file exposes — neither
+      # means anything overridden from outside this file. Everything below
+      # is a default a .env file can replace (see .env.example); STORAGE
+      # only has one valid value today (postgres), but is templated the
+      # same way as the rest on the assumption that won't always be true.
+      STORAGE: ${STORAGE:-postgres}
+      DATABASE_URL: postgres://quotes:quotes@db:5432/quotes?sslmode=disable
+      HTTP_ADDR: ":8080"
+      PROVIDER: ${PROVIDER:-fake}
+      PROVIDER_API_KEY: ${PROVIDER_API_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: [ "CMD", "wget", "-q", "-O", "-", "http://localhost:8080/healthz" ]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # Interactive UI for api/openapi.yaml. Started with everything else, no
+  # profile gate: a separate opt-in flag was tried first, but it only ever
+  # added a --profile docs everyone had to remember (or bake into task
+  # docker:up anyway) for no real benefit — this isn't a heavy or risky
+  # service, just a static spec viewer.
+  openapi-ui:
+    image: swaggerapi/swagger-ui:v5.32.15
+    environment:
+      SWAGGER_JSON: /openapi.yaml
+    volumes:
+      - ./api/openapi.yaml:/openapi.yaml:ro
+    ports:
+      - "8081:8080"
+
+volumes:
+  db-data:

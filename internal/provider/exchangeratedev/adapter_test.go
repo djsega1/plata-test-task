@@ -89,7 +89,7 @@ func TestGetCurrencyRate_Success(t *testing.T) {
 }
 
 func TestExchangerateDevProvider_ProviderAndIndicative(t *testing.T) {
-	provider := exchangeratedev.NewExchangerateDevProvider(exchangeratedev.DefaultBaseURL, "", nil, 5*time.Minute)
+	provider := exchangeratedev.NewExchangerateDevProvider(exchangeratedev.DefaultBaseURL, "", &http.Client{}, 5*time.Minute)
 
 	if got := provider.Provider(); got != "exchangerate.dev" {
 		t.Errorf("Provider() = %q, want %q", got, "exchangerate.dev")
@@ -100,7 +100,7 @@ func TestExchangerateDevProvider_ProviderAndIndicative(t *testing.T) {
 }
 
 func TestExchangerateDevProvider_StaleAfter(t *testing.T) {
-	provider := exchangeratedev.NewExchangerateDevProvider(exchangeratedev.DefaultBaseURL, "", nil, 5*time.Minute)
+	provider := exchangeratedev.NewExchangerateDevProvider(exchangeratedev.DefaultBaseURL, "", &http.Client{}, 5*time.Minute)
 	quotedAt := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 
 	tests := []struct {

@@ -1,0 +1,65 @@
+$ ./scripts/throughput.sh   # after Dispatcher.Run's self-renudge-on-full-batch fix
+==> generating POST-only load for 20s at concurrency=50
+requests: 49237 (ok=49187, errors=50) over 20s -> 2461.8 req/s
+latency: min=1.5112ms p50=15.0015ms p90=22.0021ms p99=91.2963ms max=3.6839054s
+status codes:
+  202: 49187
+==> waiting for the queue to drain (pending/in_progress -> 0, up to 30s)
+    remaining in flight: 0
+==> succeeded rows per second
+  second  | succeeded
+----------+-----------
+ 20:43:51 |       227
+ 20:43:52 |       332
+ 20:43:53 |       292
+ 20:43:54 |       292
+ 20:43:55 |       282
+ 20:43:56 |       290
+ 20:43:57 |       292
+ 20:43:58 |       298
+ 20:43:59 |       270
+ 20:44:00 |       284
+ 20:44:01 |       292
+ 20:44:02 |       492
+ 20:44:03 |       739
+ 20:44:04 |       761
+ 20:44:05 |       640
+ 20:44:06 |      1037
+ 20:44:07 |       951
+ 20:44:08 |       972
+ 20:44:09 |       540
+ 20:44:10 |       775
+ 20:44:11 |      1094
+ 20:44:12 |      1413
+ 20:44:13 |      1276
+ 20:44:14 |      1302
+ 20:44:15 |      1534
+ 20:44:16 |      1475
+ 20:44:17 |      1425
+ 20:44:18 |      1366
+ 20:44:19 |      1496
+ 20:44:20 |      1475
+ 20:44:21 |      1529
+ 20:44:22 |      1489
+ 20:44:23 |      1441
+ 20:44:24 |      1315
+ 20:44:25 |      1455
+ 20:44:26 |      1289
+ 20:44:27 |      1377
+ 20:44:28 |      1442
+ 20:44:29 |      1392
+ 20:44:30 |      1427
+ 20:44:31 |      1534
+ 20:44:32 |      1439
+ 20:44:33 |      1508
+ 20:44:34 |      1579
+ 20:44:35 |      1513
+ 20:44:36 |      1337
+ 20:44:37 |      1537
+ 20:44:38 |       699
+(48 rows)
+
+created=49216 succeeded=49216 failed=0
+best 10-second window: 14708 quotes/10s (rows reaching succeeded, i.e. queue-drain rate)
+distinct (base,quote) actually fetched from the provider during the run: 5
+  (the rest reused an existing quote inside its stale_after window — see docs/design-notes.md)

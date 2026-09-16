@@ -1,0 +1,310 @@
+openapi: 3.0.3
+info:
+  title: Currency Quotes Service
+  description: >-
+    Asynchronous currency-quotes service (see docs/design.md for the design
+    rationale behind every decision below). A client asks for a quote
+    refresh and gets an update id back; the refresh happens in the
+    background; the client then polls for the result, or asks for the
+    latest quote of a pair.
+  version: "1.0"
+servers:
+  # Absolute, not relative: the interactive UI (docker-compose.yml's
+  # openapi-ui) is served from its own origin (localhost:8081), and a
+  # relative server URL would resolve "Try it out" requests against that
+  # origin instead of the API's — a browser fetching a relative URL always
+  # resolves it against the page's own origin, not the spec's. Points at
+  # the bundled demo's published port; a real deployment reading this spec
+  # would need its own entry.
+  #
+  # No /api/v1 suffix here — /healthz and /readyz are deliberately outside
+  # that prefix (router.go), same as the rest of this spec: every path
+  # below is written out in full (/api/v1/quotes/... vs /healthz), not
+  # relying on a server-level prefix that would apply to all of them alike.
+  - url: http://localhost:8080
+
+paths:
+  /api/v1/quotes/updates:
+    post:
+      summary: Request a quote refresh for a currency pair
+      operationId: createQuoteUpdate
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: >-
+            Scoped to this endpoint only. A replay of the same key returns
+            the original update with 200 and Idempotency-Replayed: true
+            instead of creating a second one; the same key with a
+            different pair is a 409.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateUpdateRequest"
+            examples:
+              default:
+                value:
+                  pair: EUR/MXN
+      responses:
+        "202":
+          description: Update accepted, refresh runs in the background
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpdateAccepted"
+        "200":
+          description: Idempotency-Key replay of an earlier request
+          headers:
+            Idempotency-Replayed:
+              schema:
+                type: string
+                enum: ["true"]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpdateAccepted"
+        "400":
+          description: Malformed body, missing pair, or pair not shaped BASE/QUOTE
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "409":
+          description: Idempotency-Key reused with a different pair
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "422":
+          description: Pair well-formed but base/quote outside the allow-list, or base == quote
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /api/v1/quotes/updates/{id}:
+    get:
+      summary: Get the status (and, once available, the result) of an update request
+      operationId: getQuoteUpdate
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The update_id returned by POST /api/v1/quotes/updates (a UUIDv7)
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: >-
+            Always 200 while the id is known. status distinguishes
+            pending/in_progress (no rate yet — see the Retry-After header)
+            from succeeded (rate fields populated) and failed (attempts +
+            error populated).
+          headers:
+            Retry-After:
+              description: >-
+                Present only while status is pending or in_progress. A
+                fixed floor of 1 second, not tied to the dispatcher's own
+                tick interval (docs/design.md §4) — enough for the common
+                case resolved by the POST's nudge; a request waiting out a
+                longer backoff will just be polled again a little early.
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpdateStatus"
+              examples:
+                succeeded:
+                  value:
+                    update_id: 6f1e5e4a-1c2d-7a3b-8f9e-000000000001
+                    pair: EUR/MXN
+                    status: succeeded
+                    price: "18.4321000000"
+                    quoted_at: "2026-09-12T10:00:02Z"
+                    fetched_at: "2026-09-12T10:00:02Z"
+                    provider: exchangerate.dev
+                    quality: live
+                    derived: false
+                    indicative: true
+                pending:
+                  value:
+                    update_id: 6f1e5e4a-1c2d-7a3b-8f9e-000000000002
+                    pair: EUR/MXN
+                    status: pending
+                failed:
+                  value:
+                    update_id: 6f1e5e4a-1c2d-7a3b-8f9e-000000000003
+                    pair: EUR/MXN
+                    status: failed
+                    attempts: 3
+                    error:
+                      code: provider_unavailable
+                      message: upstream returned 503
+        "404":
+          description: Unknown (or unparseable) update id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /api/v1/quotes/latest:
+    get:
+      summary: Get the latest known quote for a pair, independent of any specific update
+      operationId: getLatestQuote
+      parameters:
+        - name: pair
+          in: query
+          required: true
+          description: BASE/QUOTE, e.g. EUR/MXN
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The most recent quote for this pair, ordered by quoted_at
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LatestQuote"
+        "400":
+          description: Missing pair, or pair not shaped BASE/QUOTE
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "422":
+          description: Pair well-formed but outside the allow-list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: No quote stored yet for this pair
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /healthz:
+    get:
+      summary: Liveness — always 200 once the process is up
+      operationId: healthz
+      responses:
+        "200":
+          description: OK
+
+  /readyz:
+    get:
+      summary: Readiness — 200 only once the database pool responds to a ping
+      operationId: readyz
+      responses:
+        "200":
+          description: Ready
+        "503":
+          description: Not ready
+
+components:
+  schemas:
+    CreateUpdateRequest:
+      type: object
+      required: [pair]
+      properties:
+        pair:
+          type: string
+          description: BASE/QUOTE, e.g. EUR/MXN. Allow-list is USD, EUR, MXN (docs/design.md A2).
+          example: EUR/MXN
+
+    UpdateAccepted:
+      type: object
+      properties:
+        update_id:
+          type: string
+          format: uuid
+        pair:
+          type: string
+        status:
+          type: string
+          enum: [pending]
+        created_at:
+          type: string
+          format: date-time
+
+    QuoteRate:
+      type: object
+      description: >-
+        Price and provenance fields, present once an update has succeeded
+        or a latest-quote lookup finds a row.
+      properties:
+        price:
+          type: string
+          description: Fixed 10 decimal places, serialised as a string so a JS client can't lose precision.
+          example: "18.4321000000"
+        quoted_at:
+          type: string
+          format: date-time
+          description: When the price became current at the source (not when this service read it).
+        fetched_at:
+          type: string
+          format: date-time
+          description: When this service read the price.
+        provider:
+          type: string
+          example: exchangerate.dev
+        quality:
+          type: string
+          description: live | ecb_daily | fred_daily, provider-specific.
+        derived:
+          type: boolean
+          description: Whether the source triangulated this rate rather than quoting it directly.
+        indicative:
+          type: boolean
+          description: The source marks its rates "not for settlement"; always true in practice today.
+
+    UpdateStatus:
+      allOf:
+        - type: object
+          properties:
+            update_id:
+              type: string
+              format: uuid
+            pair:
+              type: string
+            status:
+              type: string
+              enum: [pending, in_progress, succeeded, failed]
+            attempts:
+              type: integer
+              description: Present only when status is failed.
+            error:
+              type: object
+              description: Present only when status is failed.
+              properties:
+                code:
+                  type: string
+                message:
+                  type: string
+        - $ref: "#/components/schemas/QuoteRate"
+
+    LatestQuote:
+      allOf:
+        - type: object
+          properties:
+            pair:
+              type: string
+        - $ref: "#/components/schemas/QuoteRate"
+
+    ErrorEnvelope:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string

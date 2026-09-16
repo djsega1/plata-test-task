@@ -6,8 +6,8 @@ import (
 	domainquotes "github.com/djsega1/plata-test-task/internal/domain/quotes"
 )
 
-// errorEnvelope is the single error shape for every non-2xx response
-// (docs/design.md §4): {"error":{"code":"...","message":"..."}}.
+// errorEnvelope is the single error shape for every non-2xx response:
+// {"error":{"code":"...","message":"..."}}.
 type errorEnvelope struct {
 	Error errorBody `json:"error"`
 }
@@ -102,8 +102,7 @@ func newUpdateStatusResponse(req domainquotes.CurrencyRateUpdateRequest, rate *d
 
 // latestQuoteResponse is GET /quotes/latest's body: the same rate fields as
 // a succeeded updateStatusResponse, minus update_id and status — there is
-// no single update request a direct latest-quote lookup resolves to
-// (docs/design.md §4).
+// no single update request a direct latest-quote lookup resolves to.
 type latestQuoteResponse struct {
 	Pair string `json:"pair"`
 	quoteRateDTO

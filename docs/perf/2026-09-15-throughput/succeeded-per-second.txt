@@ -1,0 +1,55 @@
+$ ./scripts/throughput.sh
+==> generating POST-only load for 20s at concurrency=50
+requests: 50240 (ok=50187, errors=53) over 20s -> 2512.0 req/s
+latency: min=1.9825ms p50=14.9984ms p90=20.9946ms p99=66.9999ms max=3.1680044s
+status codes:
+  202: 50187
+==> waiting for the queue to drain (pending/in_progress -> 0, up to 30s)
+    remaining in flight: 38277
+==> succeeded rows per second
+  second  | succeeded
+----------+-----------
+ 20:33:26 |       293
+ 20:33:27 |       275
+ 20:33:28 |       292
+ 20:33:29 |       284
+ 20:33:30 |       292
+ 20:33:31 |       308
+ 20:33:32 |       307
+ 20:33:33 |       285
+ 20:33:34 |       292
+ 20:33:35 |       300
+ 20:33:36 |       300
+ 20:33:37 |       338
+ 20:33:38 |       689
+ 20:33:39 |       773
+ 20:33:40 |       900
+ 20:33:41 |      1115
+ 20:33:42 |       585
+ 20:33:43 |       939
+ 20:33:44 |      1069
+ 20:33:45 |       968
+ 20:33:46 |       469
+ 20:33:47 |        55
+ 20:33:51 |        49
+ 20:33:52 |        51
+ 20:33:56 |        71
+ 20:33:57 |        29
+ 20:34:01 |        61
+ 20:34:02 |        39
+ 20:34:06 |        60
+ 20:34:07 |        40
+ 20:34:11 |        55
+ 20:34:12 |        45
+ 20:34:16 |        80
+ 20:34:17 |        20
+ 20:34:21 |        52
+ 20:34:22 |        48
+ 20:34:26 |        46
+ 20:34:27 |        54
+(38 rows)
+
+created=50205 succeeded=11928 failed=0
+best 10-second window: 7845 quotes/10s (rows reaching succeeded, i.e. queue-drain rate)
+distinct (base,quote) actually fetched from the provider during the run: 6
+  (the rest reused an existing quote inside its stale_after window — see docs/design-notes.md)

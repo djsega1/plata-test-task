@@ -3,6 +3,7 @@ package quotes
 import (
 	"context"
 	"errors"
+	"log/slog"
 
 	domainquotes "github.com/djsega1/plata-test-task/internal/domain/quotes"
 )
@@ -18,7 +19,9 @@ type RequestUpdateResult struct {
 // resolves the Idempotency-Key contract: same key + same pair replays the
 // existing request (Replayed = true), same key + a different pair returns
 // ErrIdempotencyConflict.
-func RequestUpdate(ctx context.Context, repo Repository, clock Clock, rawPair, idempotencyKey string) (RequestUpdateResult, error) {
+func RequestUpdate(
+	ctx context.Context, logger *slog.Logger, repo Repository, clock Clock, rawPair, idempotencyKey string,
+) (RequestUpdateResult, error) {
 	pair, err := domainquotes.ParseCurrencyPair(rawPair, "/")
 	if err != nil {
 		return RequestUpdateResult{}, err
@@ -35,10 +38,13 @@ func RequestUpdate(ctx context.Context, repo Repository, clock Clock, rawPair, i
 			return RequestUpdateResult{}, err
 		}
 		if existing.Pair != pair {
+			logger.Warn("idempotency conflict", "key", idempotencyKey, "existing_pair", existing.Pair.String(), "requested_pair", pair.String())
 			return RequestUpdateResult{}, ErrIdempotencyConflict
 		}
+		logger.Info("idempotency replay", "id", existing.ID, "pair", pair.String(), "key", idempotencyKey)
 		return RequestUpdateResult{Request: existing, Replayed: true}, nil
 	}
 
+	logger.Info("update requested", "id", req.ID, "pair", pair.String())
 	return RequestUpdateResult{Request: req}, nil
 }

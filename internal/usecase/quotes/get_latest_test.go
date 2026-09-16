@@ -33,7 +33,7 @@ func TestGetLatest_ReturnsSucceededQuote(t *testing.T) {
 	fc := clock.NewFakeClock(testNow)
 	pair := testPair(t)
 
-	created, err := quotes.RequestUpdate(t.Context(), repo, fc, "EUR/USD", "")
+	created, err := quotes.RequestUpdate(t.Context(), discardLogger(), repo, fc, "EUR/USD", "")
 	require.NoError(t, err)
 
 	_, err = repo.ClaimBatch(t.Context(), 10, testNow, testNow.Add(-time.Hour))

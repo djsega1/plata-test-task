@@ -8,11 +8,10 @@ An asynchronous currency-quotes service (Go, PostgreSQL) built for the Plata Go-
 assignment. A client asks for a quote refresh and gets an update id back; the refresh happens in the
 background; the client then polls for the result, or asks for the latest quote of a pair.
 
-**`docs/design.md` is the source of truth for decisions** — it is short on purpose and grows as
-features land. Read the relevant part before changing behaviour, and when a decision changes, update
-the doc in the same change: a stale design doc is worse than none. §6 lists what is left to build,
-with a done-criterion per step. `docs/design-notes.md` holds the long-form reasoning, measurements
-and the history of reversals; it is background, not instructions.
+**`docs/design.md` is the source of truth for decisions** — it is short on purpose and reflects only
+the current state and why, not the history of how it got there. Read the relevant part before
+changing behaviour, and when a decision changes, update the doc in the same change: a stale design
+doc is worse than none. §6 lists what's left to build, if time allows.
 
 ## Commands
 
@@ -57,6 +56,9 @@ Dependencies point inwards: `api/http` → `quotes` (domain and use cases) → p
 cmd/server/main.go                 — wiring: config, adapters, http.Server, dispatcher goroutine,
                                       graceful shutdown
 cmd/server/provider.go             — factory: cfg.Provider -> RateProvider adapter
+cmd/throughput/main.go             — standalone POST load generator for scripts/throughput.sh
+                                      (docs/design.md §8); stdlib only, not part of the running
+                                      service
 
 internal/
   domain/
@@ -96,6 +98,8 @@ internal/
 
 pkg/
   clock/                            — Clock implementations: SystemClock, FakeClock
+  httpclient/                       — builds an *http.Client with an explicit, tuned Transport;
+                                      cmd/server is the only caller that decides the numbers
 ```
 
 **Ports are declared by the consumer.** `Repository`, `RateProvider` and `Clock` live in

@@ -54,8 +54,73 @@ func TestLoadDefaults(t *testing.T) {
 		DispatchPoolSize:          defaultDispatchPoolSize,
 		DispatchVisibilityTimeout: defaultDispatchVisibilityTimeout,
 		DispatchBaseBackoff:       defaultDispatchBaseBackoff,
+
+		ProviderHTTPTimeout:             defaultProviderHTTPTimeout,
+		ProviderHTTPMaxIdleConnsPerHost: defaultProviderHTTPMaxIdleConnsPerHost,
+		ProviderHTTPIdleConnTimeout:     defaultProviderHTTPIdleConnTimeout,
 	}
 	assert.Equal(t, want, cfg)
+}
+
+func TestLoadProviderHTTPTimeoutOverride(t *testing.T) {
+	cfg, err := Load(nil, fakeGetenv(withEnv(map[string]string{"PROVIDER_HTTP_TIMEOUT": "2s"})))
+	require.NoError(t, err)
+	assert.Equal(t, 2*time.Second, cfg.ProviderHTTPTimeout)
+}
+
+func TestLoadProviderHTTPMaxIdleConnsPerHostOverride(t *testing.T) {
+	cfg, err := Load(nil, fakeGetenv(withEnv(map[string]string{"PROVIDER_HTTP_MAX_IDLE_CONNS_PER_HOST": "20"})))
+	require.NoError(t, err)
+	assert.Equal(t, 20, cfg.ProviderHTTPMaxIdleConnsPerHost)
+}
+
+func TestLoadProviderHTTPMaxIdleConnsPerHostInvalid(t *testing.T) {
+	_, err := Load(nil, fakeGetenv(withEnv(map[string]string{"PROVIDER_HTTP_MAX_IDLE_CONNS_PER_HOST": "0"})))
+	assert.Error(t, err)
+}
+
+func TestLoadProviderHTTPIdleConnTimeoutOverride(t *testing.T) {
+	cfg, err := Load(nil, fakeGetenv(withEnv(map[string]string{"PROVIDER_HTTP_IDLE_CONN_TIMEOUT": "30s"})))
+	require.NoError(t, err)
+	assert.Equal(t, 30*time.Second, cfg.ProviderHTTPIdleConnTimeout)
+}
+
+func TestLoadFakeProviderDelayOverride(t *testing.T) {
+	cfg, err := Load(nil, fakeGetenv(withEnv(map[string]string{
+		"FAKE_PROVIDER_MIN_DELAY": "10ms",
+		"FAKE_PROVIDER_MAX_DELAY": "50ms",
+	})))
+	require.NoError(t, err)
+	assert.Equal(t, 10*time.Millisecond, cfg.FakeProviderMinDelay)
+	assert.Equal(t, 50*time.Millisecond, cfg.FakeProviderMaxDelay)
+}
+
+func TestLoadFakeProviderDelayZeroIsValid(t *testing.T) {
+	cfg, err := Load(nil, fakeGetenv(withEnv(map[string]string{"FAKE_PROVIDER_MIN_DELAY": "0s"})))
+	require.NoError(t, err)
+	assert.Zero(t, cfg.FakeProviderMinDelay)
+}
+
+func TestLoadFakeProviderDelayNegativeInvalid(t *testing.T) {
+	_, err := Load(nil, fakeGetenv(withEnv(map[string]string{"FAKE_PROVIDER_MIN_DELAY": "-1s"})))
+	assert.Error(t, err)
+}
+
+func TestLoadFakeProviderRPMQuotaOverride(t *testing.T) {
+	cfg, err := Load(nil, fakeGetenv(withEnv(map[string]string{"FAKE_PROVIDER_RPM_QUOTA": "5"})))
+	require.NoError(t, err)
+	assert.Equal(t, 5, cfg.FakeProviderRPMQuota)
+}
+
+func TestLoadFakeProviderRPMQuotaZeroIsValid(t *testing.T) {
+	cfg, err := Load(nil, fakeGetenv(withEnv(map[string]string{"FAKE_PROVIDER_RPM_QUOTA": "0"})))
+	require.NoError(t, err)
+	assert.Zero(t, cfg.FakeProviderRPMQuota)
+}
+
+func TestLoadFakeProviderRPMQuotaNegativeInvalid(t *testing.T) {
+	_, err := Load(nil, fakeGetenv(withEnv(map[string]string{"FAKE_PROVIDER_RPM_QUOTA": "-1"})))
+	assert.Error(t, err)
 }
 
 func TestLoadHTTPAddrOverride(t *testing.T) {

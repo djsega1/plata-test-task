@@ -31,7 +31,7 @@ func TestGetByUpdateID_ReturnsPendingRequestWithoutRate(t *testing.T) {
 	repo := memory.NewRepository()
 	fc := clock.NewFakeClock(testNow)
 
-	created, err := quotes.RequestUpdate(t.Context(), repo, fc, "EUR/USD", "")
+	created, err := quotes.RequestUpdate(t.Context(), discardLogger(), repo, fc, "EUR/USD", "")
 	require.NoError(t, err)
 
 	req, rate, err := quotes.GetByUpdateID(t.Context(), repo, created.Request.ID.String())

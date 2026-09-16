@@ -26,12 +26,12 @@ type ExchangerateDevProvider struct {
 	quoteTTL   time.Duration
 }
 
-// NewExchangerateDevProvider builds an adapter. apiKey may be empty. A nil httpClient gets a
-// 5s timeout. quoteTTL is the StaleAfter window for any quality other than "live"/"daily".
+// NewExchangerateDevProvider builds an adapter. httpClient is required —
+// wiring (cmd/server) owns building and tuning it, e.g. via pkg/httpclient;
+// this package has no opinion on transport settings or their defaults.
+// apiKey may be empty. quoteTTL is the StaleAfter window for any quality
+// other than "live"/"daily".
 func NewExchangerateDevProvider(baseURL, apiKey string, httpClient *http.Client, quoteTTL time.Duration) *ExchangerateDevProvider {
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 5 * time.Second}
-	}
 	return &ExchangerateDevProvider{baseURL: baseURL, apiKey: apiKey, httpClient: httpClient, quoteTTL: quoteTTL}
 }
 

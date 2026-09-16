@@ -122,6 +122,67 @@ func TestRecoverMiddleware(t *testing.T) {
 	}
 }
 
+func TestCORSMiddlewareReflectsOrigin(t *testing.T) {
+	handler := corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/quotes/latest", nil)
+	req.Header.Set("Origin", "http://localhost:8081")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:8081" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want the request's Origin", got)
+	}
+	if got := rec.Header().Get("Vary"); got != "Origin" {
+		t.Errorf("Vary = %q, want %q", got, "Origin")
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d (request must still reach the handler)", rec.Code, http.StatusOK)
+	}
+}
+
+func TestCORSMiddlewareNoOriginHeaderIsUnaffected(t *testing.T) {
+	handler := corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/quotes/latest", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want empty for a same-origin request", got)
+	}
+}
+
+func TestCORSMiddlewareAnswersPreflightWithoutReachingHandler(t *testing.T) {
+	called := false
+	handler := corsMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		called = true
+	}))
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodOptions, "/api/v1/quotes/updates", nil)
+	req.Header.Set("Origin", "http://localhost:8081")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+	if called {
+		t.Error("preflight OPTIONS must be answered directly, never forwarded to the next handler")
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Methods"); got == "" {
+		t.Error("Access-Control-Allow-Methods missing from preflight response")
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Headers"); got == "" {
+		t.Error("Access-Control-Allow-Headers missing from preflight response")
+	}
+}
+
 func TestRecoverMiddlewareNoPanic(t *testing.T) {
 	var buf bytes.Buffer
 	logger := bufferLogger(&buf)

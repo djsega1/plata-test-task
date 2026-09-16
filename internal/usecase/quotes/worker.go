@@ -3,6 +3,7 @@ package quotes
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"math/rand/v2"
 	"time"
 	"uuid"
@@ -19,13 +20,14 @@ type Worker struct {
 	provider RateProvider
 	clock    Clock
 	limiter  *RateLimiter
+	logger   *slog.Logger
 	sf       singleflight.Group
 
 	baseBackoff time.Duration
 }
 
-func NewWorker(repo Repository, provider RateProvider, clock Clock, limiter *RateLimiter, baseBackoff time.Duration) *Worker {
-	return &Worker{repo: repo, provider: provider, clock: clock, limiter: limiter, baseBackoff: baseBackoff}
+func NewWorker(repo Repository, provider RateProvider, clock Clock, limiter *RateLimiter, logger *slog.Logger, baseBackoff time.Duration) *Worker {
+	return &Worker{repo: repo, provider: provider, clock: clock, limiter: limiter, logger: logger, baseBackoff: baseBackoff}
 }
 
 // Process resolves one claimed request. A returned error means it wasn't
@@ -42,9 +44,14 @@ func (w *Worker) Process(ctx context.Context, req domainquotes.CurrencyRateUpdat
 	// not when it started.
 	now := w.clock.Now()
 	if err != nil {
-		return w.fail(ctx, req.ID, err, now)
+		return w.fail(ctx, req.ID, req.Pair, err, now)
 	}
-	return w.repo.CompleteSuccess(ctx, req.ID, req.Pair, rate, now)
+	if err := w.repo.CompleteSuccess(ctx, req.ID, req.Pair, rate, now); err != nil {
+		return err
+	}
+	w.logger.Info("update succeeded", "id", req.ID, "pair", req.Pair.String(),
+		"price", rate.Value.String(), "quality", rate.Quality, "provider", rate.Provider)
+	return nil
 }
 
 // resolve single-flights the whole decision per pair, not just the
@@ -59,6 +66,7 @@ func (w *Worker) resolve(ctx context.Context, pair domainquotes.CurrencyPair) (d
 		latest, err := w.repo.GetLatestQuote(ctx, pair)
 		switch {
 		case err == nil && w.clock.Now().Before(latest.StaleAfter):
+			w.logger.Debug("reusing cached quote", "pair", pair.String(), "quality", latest.Quality, "stale_after", latest.StaleAfter)
 			return latest, nil
 		case err != nil && !errors.Is(err, ErrNotFound):
 			return nil, err
@@ -66,6 +74,7 @@ func (w *Worker) resolve(ctx context.Context, pair domainquotes.CurrencyPair) (d
 		// Stale or missing (ErrNotFound): fall through to fetch a fresh quote.
 
 		if ok, retryAfter := w.limiter.Allow(w.clock.Now()); !ok {
+			w.logger.Warn("outbound rate budget exhausted", "pair", pair.String(), "retry_after", retryAfter)
 			return nil, domainquotes.NewCurrencyRateError(
 				domainquotes.RateLimitedError, "outbound rate budget exhausted", true, retryAfter, "",
 			)
@@ -83,6 +92,8 @@ func (w *Worker) resolve(ctx context.Context, pair domainquotes.CurrencyPair) (d
 		if err != nil {
 			return nil, domainquotes.NewCurrencyRateError(domainquotes.MalformedResponseError, err.Error(), false, 0, "")
 		}
+		w.logger.Info("fetched quote from provider", "pair", pair.String(),
+			"provider", rate.Provider, "quality", rate.Quality, "derived", rate.Derived)
 		return rate, nil
 	})
 	if err != nil {
@@ -94,15 +105,32 @@ func (w *Worker) resolve(ctx context.Context, pair domainquotes.CurrencyPair) (d
 // fail records a provider/business failure against id. An err that isn't a
 // CurrencyRateError (a cancelled context, an adapter's own transport error)
 // is not this service's to classify — it's returned as-is, so the caller
-// treats it like any other infrastructure failure.
-func (w *Worker) fail(ctx context.Context, id uuid.UUID, err error, now time.Time) error {
+// treats it like any other infrastructure failure (and the caller, e.g.
+// Dispatcher, logs it — nothing here duplicates that).
+func (w *Worker) fail(ctx context.Context, id uuid.UUID, pair domainquotes.CurrencyPair, err error, now time.Time) error {
 	var rateErr domainquotes.CurrencyRateError
 	if !errors.As(err, &rateErr) {
 		return err
 	}
 
 	nextAttemptAt := w.backoff(rateErr, now)
-	return w.repo.CompleteFailure(ctx, id, string(rateErr.Code()), rateErr.Error(), rateErr.Retryable(), nextAttemptAt, now)
+	if err := w.repo.CompleteFailure(
+		ctx, id, string(rateErr.Code()), rateErr.Error(), rateErr.Retryable(), nextAttemptAt, now,
+	); err != nil {
+		return err
+	}
+
+	// Retryable is logged at Warn (expected, will be retried) vs Error
+	// (permanent — e.g. unsupported_pair, auth_error) — this is the only
+	// place a classified failure is logged at all; without it, a failed
+	// update was only ever visible by querying quote_updates.status='failed'.
+	level, msg := slog.LevelWarn, "update deferred for retry"
+	if !rateErr.Retryable() {
+		level, msg = slog.LevelError, "update failed permanently"
+	}
+	w.logger.Log(ctx, level, msg,
+		"id", id, "pair", pair.String(), "code", rateErr.Code(), "error", rateErr.Error(), "next_attempt_at", nextAttemptAt)
+	return nil
 }
 
 // backoff is baseBackoff or err's own RetryAfter, whichever is later,

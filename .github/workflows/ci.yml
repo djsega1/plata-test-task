@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: build, vet, lint, unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt (must print nothing)
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "$out"
+            exit 1
+          fi
+
+      # -tags=integration also statically checks integration-tagged files;
+      # actually running them needs a database (see integration-tests below).
+      - name: go vet
+        run: go vet -tags=integration ./...
+
+      # Pinned to the exact version already validated against
+      # .golangci.yml's v2 schema in this repo, not the action's default.
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.13.2
+          args: --build-tags=integration
+
+      - name: build
+        run: go build ./...
+
+      # Must pass without a database — integration tests skip themselves
+      # when TEST_DATABASE_URL is unset.
+      - name: unit tests
+        run: go test -race ./... -cover
+
+  integration-tests:
+    name: integration tests (postgres 18)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: quotes
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: integration tests
+        env:
+          TEST_DATABASE_URL: postgres://postgres@localhost:5432/quotes
+        run: go test -tags=integration -race ./internal/storage/postgres/
+
+  docker-smoke:
+    name: docker compose smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # --wait blocks until every service with a healthcheck (db, app —
+      # docker-compose.yml) reports healthy, and fails if one doesn't,
+      # instead of a hand-rolled polling loop.
+      - name: docker compose up
+        run: docker compose up -d --build --wait
+
+      - name: smoke test
+        run: bash scripts/smoke.sh
+
+      - name: docker compose logs (always, for debugging)
+        if: always()
+        run: docker compose logs
+
+      - name: docker compose down
+        if: always()
+        run: docker compose down -v --remove-orphans

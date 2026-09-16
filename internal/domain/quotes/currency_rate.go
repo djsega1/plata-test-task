@@ -19,7 +19,7 @@ type CurrencyRate struct {
 }
 
 // NewCurrencyRate validates value > 0 before a rate is persisted to the
-// quotes journal (see docs/design.md §5).
+// quotes journal.
 func NewCurrencyRate(
 	value decimal.Decimal,
 	derived bool,

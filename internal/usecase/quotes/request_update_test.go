@@ -1,6 +1,8 @@
 package quotes_test
 
 import (
+	"bytes"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -28,7 +30,7 @@ func TestRequestUpdate_CreatesPending(t *testing.T) {
 	repo := memory.NewRepository()
 	fc := clock.NewFakeClock(testNow)
 
-	result, err := quotes.RequestUpdate(t.Context(), repo, fc, "EUR/USD", "")
+	result, err := quotes.RequestUpdate(t.Context(), discardLogger(), repo, fc, "EUR/USD", "")
 	require.NoError(t, err)
 	assert.False(t, result.Replayed)
 	assert.Equal(t, domainquotes.StatusPending, result.Request.Status)
@@ -39,12 +41,12 @@ func TestRequestUpdate_ReplaysSameKeySamePair(t *testing.T) {
 	repo := memory.NewRepository()
 	fc := clock.NewFakeClock(testNow)
 
-	first, err := quotes.RequestUpdate(t.Context(), repo, fc, "EUR/USD", "key-1")
+	first, err := quotes.RequestUpdate(t.Context(), discardLogger(), repo, fc, "EUR/USD", "key-1")
 	require.NoError(t, err)
 	require.False(t, first.Replayed)
 
 	fc.Advance(time.Minute)
-	second, err := quotes.RequestUpdate(t.Context(), repo, fc, "EUR/USD", "key-1")
+	second, err := quotes.RequestUpdate(t.Context(), discardLogger(), repo, fc, "EUR/USD", "key-1")
 	require.NoError(t, err)
 	assert.True(t, second.Replayed)
 	assert.Equal(t, first.Request.ID, second.Request.ID)
@@ -54,10 +56,10 @@ func TestRequestUpdate_ConflictsSameKeyDifferentPair(t *testing.T) {
 	repo := memory.NewRepository()
 	fc := clock.NewFakeClock(testNow)
 
-	_, err := quotes.RequestUpdate(t.Context(), repo, fc, "EUR/USD", "key-1")
+	_, err := quotes.RequestUpdate(t.Context(), discardLogger(), repo, fc, "EUR/USD", "key-1")
 	require.NoError(t, err)
 
-	_, err = quotes.RequestUpdate(t.Context(), repo, fc, "EUR/MXN", "key-1")
+	_, err = quotes.RequestUpdate(t.Context(), discardLogger(), repo, fc, "EUR/MXN", "key-1")
 	assert.ErrorIs(t, err, quotes.ErrIdempotencyConflict)
 }
 
@@ -65,9 +67,9 @@ func TestRequestUpdate_EmptyKeyDoesNotCollide(t *testing.T) {
 	repo := memory.NewRepository()
 	fc := clock.NewFakeClock(testNow)
 
-	first, err := quotes.RequestUpdate(t.Context(), repo, fc, "EUR/USD", "")
+	first, err := quotes.RequestUpdate(t.Context(), discardLogger(), repo, fc, "EUR/USD", "")
 	require.NoError(t, err)
-	second, err := quotes.RequestUpdate(t.Context(), repo, fc, "EUR/USD", "")
+	second, err := quotes.RequestUpdate(t.Context(), discardLogger(), repo, fc, "EUR/USD", "")
 	require.NoError(t, err)
 	assert.NotEqual(t, first.Request.ID, second.Request.ID)
 }
@@ -76,6 +78,53 @@ func TestRequestUpdate_RejectsPairOutsideAllowList(t *testing.T) {
 	repo := memory.NewRepository()
 	fc := clock.NewFakeClock(testNow)
 
-	_, err := quotes.RequestUpdate(t.Context(), repo, fc, "XXX/USD", "")
+	_, err := quotes.RequestUpdate(t.Context(), discardLogger(), repo, fc, "XXX/USD", "")
 	assert.Error(t, err)
+}
+
+func TestRequestUpdate_LogsCreated(t *testing.T) {
+	repo := memory.NewRepository()
+	fc := clock.NewFakeClock(testNow)
+
+	var buf bytes.Buffer
+	result, err := quotes.RequestUpdate(t.Context(), bufferLogger(&buf, slog.LevelInfo), repo, fc, "EUR/USD", "")
+	require.NoError(t, err)
+
+	line := findLogLine(t, decodeLogLines(t, &buf), "update requested")
+	assert.Equal(t, "EUR/USD", line["pair"])
+	assert.Equal(t, result.Request.ID.String(), line["id"])
+}
+
+func TestRequestUpdate_LogsIdempotencyReplay(t *testing.T) {
+	repo := memory.NewRepository()
+	fc := clock.NewFakeClock(testNow)
+
+	_, err := quotes.RequestUpdate(t.Context(), discardLogger(), repo, fc, "EUR/USD", "key-1")
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	fc.Advance(time.Minute)
+	_, err = quotes.RequestUpdate(t.Context(), bufferLogger(&buf, slog.LevelInfo), repo, fc, "EUR/USD", "key-1")
+	require.NoError(t, err)
+
+	line := findLogLine(t, decodeLogLines(t, &buf), "idempotency replay")
+	assert.Equal(t, "EUR/USD", line["pair"])
+	assert.Equal(t, "key-1", line["key"])
+}
+
+func TestRequestUpdate_LogsIdempotencyConflictAtWarn(t *testing.T) {
+	repo := memory.NewRepository()
+	fc := clock.NewFakeClock(testNow)
+
+	_, err := quotes.RequestUpdate(t.Context(), discardLogger(), repo, fc, "EUR/USD", "key-1")
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	_, err = quotes.RequestUpdate(t.Context(), bufferLogger(&buf, slog.LevelInfo), repo, fc, "EUR/MXN", "key-1")
+	assert.ErrorIs(t, err, quotes.ErrIdempotencyConflict)
+
+	line := findLogLine(t, decodeLogLines(t, &buf), "idempotency conflict")
+	assert.Equal(t, "WARN", line["level"])
+	assert.Equal(t, "EUR/USD", line["existing_pair"])
+	assert.Equal(t, "EUR/MXN", line["requested_pair"])
 }

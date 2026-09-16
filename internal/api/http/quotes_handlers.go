@@ -31,9 +31,8 @@ const (
 	msgInternalError     = "internal server error"
 )
 
-// postQuotesUpdatesHandler enqueues a quote refresh (docs/design.md §4).
-// nudge may be nil (see nudgeDispatcher) — tests that don't wire a
-// dispatcher can pass one.
+// postQuotesUpdatesHandler enqueues a quote refresh. nudge may be nil (see
+// nudgeDispatcher) — tests that don't wire a dispatcher can pass one.
 func postQuotesUpdatesHandler(logger *slog.Logger, repo quotes.Repository, clk quotes.Clock, nudge chan<- struct{}) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body createUpdateRequest
@@ -46,7 +45,7 @@ func postQuotesUpdatesHandler(logger *slog.Logger, repo quotes.Repository, clk q
 			return
 		}
 
-		result, err := quotes.RequestUpdate(r.Context(), repo, clk, body.Pair, r.Header.Get("Idempotency-Key"))
+		result, err := quotes.RequestUpdate(r.Context(), logger, repo, clk, body.Pair, r.Header.Get("Idempotency-Key"))
 		if err != nil {
 			switch {
 			case errors.Is(err, domainquotes.ErrMalformedPair):
