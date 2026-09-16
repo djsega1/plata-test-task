@@ -20,7 +20,9 @@ services:
       - "5432:5432"
 
   app:
-    build: .
+    image: quotes-app:local
+    build:
+      context: .
     depends_on:
       db:
         condition: service_healthy
