@@ -37,7 +37,7 @@ services:
       STORAGE: ${STORAGE:-postgres}
       DATABASE_URL: postgres://quotes:quotes@db:5432/quotes?sslmode=disable
       HTTP_ADDR: ":8080"
-      PROVIDER: ${PROVIDER:-fake}
+      PROVIDER: ${PROVIDER:-exchangeratedev}
       PROVIDER_API_KEY: ${PROVIDER_API_KEY:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:

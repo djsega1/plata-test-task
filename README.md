@@ -8,18 +8,18 @@
 ## Быстрый старт (Docker)
 
 ```bash
-cp .env.example .env   # опционально — по умолчанию всё работает офлайн, ключ не нужен
+cp .env.example .env   # опционально — по умолчанию нужна только внешняя сеть, ключ не нужен
 docker compose up -d --build   # или: task docker:up
 ./scripts/smoke.sh
 ```
 
-Поднимается PostgreSQL 18, сервис (`PROVIDER=fake` по умолчанию — внешняя сеть и API-ключ не нужны)
-и Swagger UI на `http://localhost:8081`. Скрипт дожидается `healthy` и проходит все три бизнес-ручки
-насквозь: `POST /api/v1/quotes/updates` → поллинг `GET /api/v1/quotes/updates/{id}` до `succeeded` →
+Поднимается PostgreSQL 18, сервис (`PROVIDER=exchangeratedev` по умолчанию — реальный апстрим,
+работает анонимно, `PROVIDER_API_KEY` опционален, см. `docs/design.md` §2) и Swagger UI на
+`http://localhost:8081`. Скрипт дожидается `healthy` и проходит все три бизнес-ручки насквозь:
+`POST /api/v1/quotes/updates` → поллинг `GET /api/v1/quotes/updates/{id}` до `succeeded` →
 `GET /api/v1/quotes/latest`.
 
-Чтобы обратиться к реальному апстриму: выставить `PROVIDER=exchangeratedev` в `.env` (всё ещё
-анонимно — `PROVIDER_API_KEY` опционален, см. `docs/design.md` §2) и пересобрать.
+Чтобы прогнать полностью офлайн, без сети и ключа: выставить `PROVIDER=fake` в `.env` и пересобрать.
 
 `task docker:down` останавливает связку; добавить `-v` к `docker compose down`, чтобы ещё и удалить
 том БД.

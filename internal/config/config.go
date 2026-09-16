@@ -105,7 +105,7 @@ const (
 	defaultIdleTimeout        = 60 * time.Second
 	defaultShutdownTimeout    = 10 * time.Second
 	defaultLogLevel           = slog.LevelInfo
-	defaultProvider           = ProviderFake
+	defaultProvider           = ProviderExchangerateDev
 	defaultStorage            = StoragePostgres
 	defaultQuoteTTL           = 5 * time.Minute
 	defaultRateLimitPerMinute = 12
