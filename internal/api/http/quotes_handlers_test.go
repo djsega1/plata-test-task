@@ -186,6 +186,34 @@ func TestPostQuotesUpdates_IdempotencyKeyTooLong(t *testing.T) {
 	assert.Equal(t, "invalid_request", decodeBody[errorEnvelope](t, rec).Error.Code)
 }
 
+// TestPostQuotesUpdates_BodyTooLarge covers the 413 branch added alongside
+// DisallowUnknownFields: http.MaxBytesReader's error must be distinguished
+// from an ordinary malformed-JSON 400, not folded into it.
+func TestPostQuotesUpdates_BodyTooLarge(t *testing.T) {
+	router, _, _ := newBusinessRouter(t)
+
+	oversized := map[string]string{"pair": "EUR/MXN", "padding": strings.Repeat("a", 5<<10)}
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/quotes/updates",
+		bytes.NewReader(mustJSON(t, oversized)))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, r)
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+	assert.Equal(t, "payload_too_large", decodeBody[errorEnvelope](t, rec).Error.Code)
+}
+
+// TestPostQuotesUpdates_RejectsUnknownField covers DisallowUnknownFields:
+// a client sending an extra field must be rejected, not silently ignored.
+func TestPostQuotesUpdates_RejectsUnknownField(t *testing.T) {
+	router, _, _ := newBusinessRouter(t)
+
+	rec := doJSON(t, router, http.MethodPost, "/api/v1/quotes/updates",
+		map[string]string{"pair": "EUR/MXN", "amount": "100"})
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, "invalid_request", decodeBody[errorEnvelope](t, rec).Error.Code)
+}
+
 func TestPostQuotesUpdates_IdempotencyConflict(t *testing.T) {
 	router, _, _ := newBusinessRouter(t)
 
@@ -336,6 +364,30 @@ func TestGetQuotesUpdate_Failed(t *testing.T) {
 	assert.Equal(t, "no rate available for this pair", body.Error.Message)
 }
 
+// TestGetQuotesUpdate_Failed_UnrecognizedCodeFallsBackToGenericMessage
+// covers safeErrorMessage's fallback path: a stored error_code with no
+// entry in the map (e.g. a future worker code this handler wasn't updated
+// for) must still get a generic message, never the raw stored text.
+func TestGetQuotesUpdate_Failed_UnrecognizedCodeFallsBackToGenericMessage(t *testing.T) {
+	router, repo, fc := newBusinessRouter(t)
+	pair := testPair(t)
+	req := domainquotes.NewCurrencyRateUpdateRequest(pair, fc.Now())
+	require.NoError(t, repo.CreateUpdateRequest(t.Context(), req, ""))
+	_, err := repo.ClaimBatch(t.Context(), 10, fc.Now(), fc.Now().Add(-time.Hour))
+	require.NoError(t, err)
+	require.NoError(t, repo.CompleteFailure(
+		t.Context(), req.ID, "some_future_code", "raw internal detail: dial tcp 10.0.0.1:443", false, time.Time{}, fc.Now(),
+	))
+
+	rec := doJSON(t, router, http.MethodGet, "/api/v1/quotes/updates/"+req.ID.String(), nil)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	body := decodeBody[wireQuote](t, rec)
+	require.NotNil(t, body.Error)
+	assert.Equal(t, "some_future_code", body.Error.Code)
+	assert.Equal(t, "the update failed", body.Error.Message)
+}
+
 func TestGetQuotesUpdate_NotFound(t *testing.T) {
 	router, _, _ := newBusinessRouter(t)
 
@@ -371,6 +423,28 @@ func TestGetQuotesLatest_Found(t *testing.T) {
 	body := decodeBody[wireQuote](t, rec)
 	assert.Equal(t, "EUR/MXN", body.Pair)
 	assert.Equal(t, "18.4321000000", body.Price)
+}
+
+// TestGetQuotesLatest_NormalizesPairInResponse covers a mismatch between
+// this endpoint and POST: POST always echoes the parsed, normalized pair,
+// but this handler used to echo the raw query string verbatim — a lowercase
+// or loosely-spaced ?pair= would come back exactly as sent instead of
+// canonical BASE/QUOTE.
+func TestGetQuotesLatest_NormalizesPairInResponse(t *testing.T) {
+	router, repo, fc := newBusinessRouter(t)
+	pair := testPair(t)
+	req := domainquotes.NewCurrencyRateUpdateRequest(pair, fc.Now())
+	require.NoError(t, repo.CreateUpdateRequest(t.Context(), req, ""))
+	_, err := repo.ClaimBatch(t.Context(), 10, fc.Now(), fc.Now().Add(-time.Hour))
+	require.NoError(t, err)
+	rate := testRate(t, fc.Now())
+	require.NoError(t, repo.CompleteSuccess(t.Context(), req.ID, pair, rate, fc.Now()))
+
+	rec := doJSON(t, router, http.MethodGet, "/api/v1/quotes/latest?pair=eur/mxn", nil)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	body := decodeBody[wireQuote](t, rec)
+	assert.Equal(t, "EUR/MXN", body.Pair, "must echo the normalized pair, not the raw lowercase query value")
 }
 
 func TestGetQuotesLatest_NotFound(t *testing.T) {

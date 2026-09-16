@@ -70,14 +70,21 @@ paths:
                 $ref: "#/components/schemas/UpdateAccepted"
         "400":
           description: >-
-            Malformed body, missing pair, pair not shaped BASE/QUOTE, or
-            Idempotency-Key over 255 characters
+            Malformed body, missing pair, pair not shaped BASE/QUOTE, an
+            unrecognized field in the body, or Idempotency-Key over 255
+            characters
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
         "409":
           description: Idempotency-Key reused with a different pair
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "413":
+          description: Body exceeds the 4 KiB limit
           content:
             application/json:
               schema:
